@@ -1,0 +1,58 @@
+{
+  "reviewType": "test-design",
+
+  "project": {
+    "root": "/absolute/path/to/project",
+    "branch": "feature/DEV-2951"
+  },
+
+  "task": {
+    "id": "DEV-2951",
+    "source": "jira",
+    "title": "Archive a resource",
+    "description": "A user may archive a resource that belongs to their own tenant.",
+    "acceptanceCriteria": [
+      "Archiving an active resource sets status to archived and records archivedAt.",
+      "Archiving an already-archived resource is a no-op and returns success.",
+      "A user cannot archive a resource belonging to another tenant."
+    ]
+  },
+
+  "artifacts": {
+    "blastRadiusPath": "docs/DEV-2951/blast-radius.md",
+    "testCharterPath": "docs/DEV-2951/test-charter.md"
+  },
+
+  "candidate": {
+    "testCases": [
+      {
+        "id": "TC-001",
+        "title": "Archiving an active resource sets status to archived",
+        "priority": "high",
+        "type": "functional",
+        "preconditions": ["A resource exists in status 'active' owned by the caller's tenant"],
+        "steps": ["POST /resources/{id}/archive"],
+        "expectedResult": "200 OK; status is 'archived'; archivedAt is set",
+        "requirementRefs": ["AC1"]
+      },
+      {
+        "id": "TC-002",
+        "title": "Archiving a resource in another tenant is rejected",
+        "priority": "high",
+        "type": "security",
+        "preconditions": ["A resource exists owned by a different tenant"],
+        "steps": ["POST /resources/{id}/archive as a user of tenant B"],
+        "expectedResult": "403 Forbidden; the resource is unchanged",
+        "requirementRefs": ["AC3"]
+      }
+    ],
+    "notes": "Produced after reading the ticket and the diff; an internal adversarial pass already ran."
+  },
+
+  "options": {
+    "useJira": true,
+    "useDatabase": true,
+    "useExternalMcps": true,
+    "pass": 1
+  }
+}

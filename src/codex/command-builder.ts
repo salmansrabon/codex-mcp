@@ -1,0 +1,80 @@
+import type { Config } from '../config/config.js';
+
+export interface BrokerLaunchSpec {
+  /** MCP server name Codex will register the evidence broker under. */
+  name: string;
+  command: string;
+  args: readonly string[];
+  env?: Readonly<Record<string, string>>;
+}
+
+export interface BuildCodexArgsOptions {
+  config: Config;
+  projectRoot: string;
+  /** Where Codex writes its final message. */
+  lastMessageFile: string;
+  /** Evidence broker to expose to Codex, if any connectors are usable. */
+  broker?: BrokerLaunchSpec;
+  /** Optional JSON Schema file constraining the final response. */
+  outputSchemaFile?: string;
+}
+
+/**
+ * Build the `codex exec` argv (PLAN.md §20).
+ *
+ * Non-negotiable properties of every invocation:
+ *   - non-interactive (`exec`, prompt on stdin);
+ *   - sandboxed to the configured mode, which defaults to `read-only`;
+ *   - rooted at the caller's project directory;
+ *   - explicit about the model — never silently substituted;
+ *   - ephemeral by default, so a review leaves no session state behind.
+ */
+export function buildCodexArgs(options: BuildCodexArgsOptions): string[] {
+  const { config, projectRoot, lastMessageFile, broker, outputSchemaFile } = options;
+
+  const args: string[] = ['exec'];
+
+  args.push('--sandbox', config.sandbox);
+  args.push('-C', projectRoot);
+  args.push('--skip-git-repo-check');
+  args.push('--json');
+  args.push('-o', lastMessageFile);
+  args.push('--color', 'never');
+
+  if (config.ephemeral) args.push('--ephemeral');
+  if (config.model) args.push('-m', config.model);
+  if (outputSchemaFile) args.push('--output-schema', outputSchemaFile);
+
+  args.push('-c', `model_reasoning_effort=${tomlString(config.reasoningEffort)}`);
+
+  // Approvals must never block a headless review; `never` makes Codex fail the
+  // action instead of hanging on a prompt nobody can answer.
+  args.push('-c', 'approval_policy="never"');
+
+  if (broker) {
+    const prefix = `mcp_servers.${broker.name}`;
+    args.push('-c', `${prefix}.command=${tomlString(broker.command)}`);
+    args.push('-c', `${prefix}.args=${tomlStringArray(broker.args)}`);
+    if (broker.env && Object.keys(broker.env).length > 0) {
+      args.push('-c', `${prefix}.env=${tomlInlineTable(broker.env)}`);
+    }
+  }
+
+  // The prompt itself arrives on stdin; `-` makes that explicit.
+  args.push('-');
+
+  return args;
+}
+
+function tomlString(value: string): string {
+  return JSON.stringify(value);
+}
+
+function tomlStringArray(values: readonly string[]): string {
+  return `[${values.map(tomlString).join(',')}]`;
+}
+
+function tomlInlineTable(record: Readonly<Record<string, string>>): string {
+  const entries = Object.entries(record).map(([key, value]) => `${key}=${tomlString(value)}`);
+  return `{${entries.join(',')}}`;
+}

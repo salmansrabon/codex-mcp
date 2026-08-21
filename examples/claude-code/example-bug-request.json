@@ -1,0 +1,40 @@
+{
+  "reviewType": "bugs",
+
+  "project": {
+    "root": "/absolute/path/to/project",
+    "branch": "feature/DEV-2951"
+  },
+
+  "task": {
+    "id": "DEV-2951",
+    "source": "jira",
+    "title": "Archive a resource"
+  },
+
+  "candidate": {
+    "bugs": [
+      {
+        "id": "BUG-001",
+        "title": "archive() throws when the resource does not exist",
+        "severity": "medium",
+        "component": "resource-service",
+        "stepsToReproduce": ["Call archive() with an id that is not in the database"],
+        "expectedBehavior": "A not-found error is returned to the caller",
+        "actualBehavior": "TypeError: cannot read property 'status' of null",
+        "evidence": [{ "source": "code", "location": "src/resource/service.ts:14" }]
+      },
+      {
+        "id": "BUG-002",
+        "title": "Any authenticated user can archive any tenant's resource",
+        "severity": "critical",
+        "component": "resource-controller",
+        "stepsToReproduce": ["POST /resources/{id}/archive with an id owned by another tenant"],
+        "expectedBehavior": "403 Forbidden",
+        "actualBehavior": "The resource is archived",
+        "evidence": [{ "source": "code", "location": "src/resource/controller.ts:5" }],
+        "suspectedCause": "The controller uses req.params.id without checking ownership."
+      }
+    ]
+  }
+}

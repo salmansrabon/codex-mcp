@@ -1,0 +1,166 @@
+review:
+  # No default — omit to let Codex pick. gpt-5.6-sol | gpt-5.6-terra | gpt-5.6-luna | gpt-5.5 | gpt-5.4 | gpt-5.4-mini; prefer a frontier model, a cheap reviewer just agrees.
+  model: gpt-5.6-sol
+
+  # Defaults to false. Turn on for a shared gate, so a Codex default change cannot quietly alter review quality.
+  requireModel: true
+
+  # read-only | workspace-write | danger-full-access — anything else voids the non-mutating guarantee.
+  sandbox: read-only
+
+  # minimal | low | medium | high | xhigh | max | ultra — availability varies by model.
+  reasoningEffort: high
+
+  # Discard Codex session state after each review.
+  ephemeral: true
+
+  # Reject reviews past this pass, so a reconciliation loop cannot run forever.
+  maxPasses: 2
+
+  # Hard stop for a single review, in milliseconds.
+  timeoutMs: 900000
+
+  # Reviews allowed to run at once; the rest queue.
+  maxConcurrentReviews: 2
+
+  # Largest artifact accepted, in bytes.
+  maxArtifactBytes: 200000
+
+  # Largest candidate list accepted.
+  maxCandidateItems: 500
+
+auth:
+  # chatgpt (browser sign-in) | api (OpenAI key) — a review fails if the Codex CLI is in the other mode.
+  mode: chatgpt
+
+  # Codex executable, if it is not on PATH as `codex`.
+  codexBinary: codex
+
+permissions:
+  project:
+    # Let the reviewer read the project root it was handed.
+    read: true
+
+    # Always false; the reviewer never writes.
+    write: false
+
+  git:
+    # Let the reviewer read history and the working diff.
+    read: true
+
+    # Always false; no commits, branches, or pushes.
+    write: false
+
+  # Blanket relaxation for tools that cannot be classified read-only; prefer per-connector allowTools.
+  allowUnknownDownstreamTools: false
+
+logging:
+  # error | warn | info | debug
+  level: info
+
+# Downstream MCP servers brokered as read-only evidence. Codex never connects to
+# these directly — codex-mcp discovers their tools, classifies risk, and exposes
+# only what passes policy. Credentials here are likely committed; prefer letting
+# each connector read its own.
+connectors:
+  jira:
+    # Off until you point it at a real server.
+    enabled: false
+
+    # jira | database | testmanagement | external_file | custom — drives normalization and per-kind rules.
+    kind: jira
+
+    # always (every review) | once (per session) | trusted (never ask) — a client that cannot show prompts SKIPS the connector.
+    approval: once
+
+    # stdio (launch a command) | http (call a url).
+    transport: stdio
+
+    # Executable to launch.
+    command: npx
+
+    # Arguments to it.
+    args: ['-y', 'your-jira-mcp-server']
+
+    # Working directory for it; defaults to codex-mcp's own.
+    cwd: /path/to/your-jira-mcp
+
+    # The child inherits ONLY PATH, HOME, and what is declared here.
+    env:
+      JIRA_BASE_URL: https://your-org.atlassian.net
+      JIRA_EMAIL: you@your-org.com
+      JIRA_API_TOKEN: ''
+
+    # Tools to expose even if policy would withhold them; empty means policy decides.
+    allowTools: []
+
+    # Tools to withhold regardless of policy.
+    denyTools: []
+
+    # How long the server may take to start, in milliseconds.
+    startupTimeoutMs: 30000
+
+    # How long a single tool call may take, in milliseconds.
+    callTimeoutMs: 60000
+
+  database:
+    enabled: false
+    kind: database
+    approval: once
+    transport: stdio
+    command: npx
+    args: ['-y', 'your-db-mcp-server']
+
+    # Use a READ-ONLY account: the grant is the boundary that does not depend on this server being correct.
+    env:
+      DATABASE_URL: postgres://readonly_user:password@db.internal:5432/appdb
+
+    # Not a default. A generic SQL executor is withheld because its name says nothing about what a caller may pass it; allowlisting is safe, every statement still goes through the read-only SQL policy.
+    allowTools: ['execute_query']
+
+    # Not a default.
+    denyTools: ['update_query']
+
+    # Rows returned per query, injected as a cap.
+    maxRows: 500
+
+    # Per-query timeout, in milliseconds.
+    timeoutMs: 10000
+
+  testrail:
+    enabled: false
+    kind: testmanagement
+    approval: once
+    transport: stdio
+    command: npx
+    args: ['-y', 'your-testrail-mcp-server']
+    env:
+      TESTRAIL_URL: https://your-org.testrail.io
+      TESTRAIL_USERNAME: you@your-org.com
+      TESTRAIL_API_KEY: ''
+
+  ftp:
+    enabled: false
+    kind: external_file
+    approval: once
+    transport: stdio
+    command: npx
+    args: ['-y', 'your-ftp-mcp-server']
+    env:
+      FTP_HOST: files.internal
+      FTP_PORT: '21'
+      FTP_USER: qa_readonly
+      FTP_PASSWORD: ''
+
+  internal-tools:
+    enabled: false
+    kind: custom
+    approval: once
+
+    # An http connector needs a url instead of a command.
+    transport: http
+    url: https://mcp.internal.example.com/mcp
+
+    # http connectors carry credentials in headers rather than env.
+    headers:
+      Authorization: Bearer your-token-here

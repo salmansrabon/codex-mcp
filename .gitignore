@@ -1,0 +1,38 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+*.tgz
+
+# Local credentials and machine-specific config. The committed counterpart is
+# codex-mcp.example.yaml.
+.env
+.env.local
+.env.*.local
+
+# Every filename the config loader accepts — otherwise a user on codex-mcp.yml
+# commits their own absolute connector paths without noticing.
+codex-mcp.yaml
+codex-mcp.yml
+.codex-mcp.yaml
+.codex-mcp.yml
+
+*.log
+npm-debug.log*
+.codex-mcp-tmp/
+
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Per-developer agent state. `.claude/` itself is shareable; the local settings
+# file holds one machine's tool permissions.
+.claude/settings.local.json
+
+# Codex CLI session state, if anyone runs it with this repo as the cwd.
+.codex/
+
+PLAN.md
+CLAUDE.md
+.claude

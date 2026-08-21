@@ -1,0 +1,65 @@
+{
+  "reviewId": "rev_4f2a91c0d3e85b76",
+  "reviewType": "test-design",
+  "status": "CHANGES_REQUIRED",
+
+  "testDesign": {
+    "status": "CHANGES_REQUIRED",
+    "summary": { "accepted": 2, "modify": 0, "remove": 0, "missing": 2 },
+    "accepted": ["TC-001", "TC-002"],
+    "modify": [],
+    "remove": [],
+    "missing": [
+      {
+        "title": "Archiving an already-archived resource is a no-op and does not move archivedAt",
+        "priority": "high",
+        "dimension": "idempotency",
+        "reason": "service.ts returns the existing resource early when status is already 'archived'. AC2 requires this, and no candidate exercises it. A regression here would silently rewrite audit timestamps.",
+        "evidence": [{ "source": "code", "location": "src/resource/service.ts:9" }],
+        "suggestedAssertion": "archivedAt is unchanged after a second archive call"
+      },
+      {
+        "title": "Archiving a non-existent resource returns 404 rather than throwing",
+        "priority": "medium",
+        "dimension": "error handling",
+        "reason": "findResource can return null and requireTenantAccess maps that to 404, but nothing verifies the mapping.",
+        "evidence": [{ "source": "code", "location": "src/middleware/access.ts:5" }]
+      }
+    ],
+    "disagreements": [],
+    "limitations": [
+      {
+        "area": "database",
+        "detail": "No database connector is configured; persistence claims could not be verified against real data.",
+        "impact": "The archivedAt assertion is derived from code alone."
+      }
+    ]
+  },
+
+  "meta": {
+    "model": "gpt-5.6-terra",
+    "reasoningEffort": "high",
+    "sandbox": "read-only",
+    "pass": 1,
+    "maxPasses": 2,
+    "furtherPassesAllowed": true,
+    "durationMs": 74213,
+    "startedAt": "2026-08-21T09:12:04.118Z",
+    "completedAt": "2026-08-21T09:13:18.331Z",
+    "outputRepairAttempts": 0,
+    "candidateCounts": { "testCases": 2, "bugs": 0 },
+    "evidence": {
+      "projectRootId": "9a3f1c02d7b4",
+      "git": true,
+      "blastRadius": true,
+      "testCharter": true,
+      "requirement": true,
+      "connectors": ["jira"]
+    }
+  },
+
+  "reconciliation": {
+    "instruction": "This is an independent second opinion, not a verdict. Verify each objection against the cited evidence: apply the ones the evidence supports, reject the ones it does not (recording why), and investigate the rest. codex-mcp has not written and must not write your final artifact.",
+    "codexIsNotAuthoritative": true
+  }
+}

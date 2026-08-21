@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "codex-mcp": {
+      "command": "codex-mcp",
+      "args": ["start"],
+      "env": {
+        "CODEX_MODEL": "gpt-5.6-sol",
+        "CODEX_REASONING_EFFORT": "high",
+        "CODEX_SANDBOX": "read-only",
+        "MAX_REVIEW_PASSES": "2"
+      }
+    }
+  }
+}
