@@ -108,13 +108,38 @@ Only now reconcile the candidates against the model you built. Classify each:
   incorrect, unsupported, ambiguous, incomplete, or weak. Say exactly what must
   change, and cite the evidence.
 - **remove** — redundant against another candidate or an existing test, obsolete,
-  or verifies nothing meaningful. Identify what supersedes it.
+  or verifies nothing meaningful. Identify what supersedes it, and read the bar
+  for removal below before proposing one.
 - **missing** — coverage your independent analysis requires that no candidate
   provides. Cite the evidence establishing the risk or the expected behavior.
 
 Inspect the candidate set for these quality problems:
 
 ${TEST_QUALITY_CHECKS.map((check) => `- ${check}`).join('\n')}
+
+**The bar for removal.** "An automated test already covers this" is not
+sufficient grounds, and treating it as such is the most common way this review
+does harm. Automated coverage and a manual case answer different questions: CI
+proves the path still behaves as encoded, a manual case is how a human finds the
+thing nobody encoded. Before proposing a removal, establish that the superseding
+test asserts the **same observable outcome under the same preconditions** — and
+say which test, by name.
+
+Two cases where removal needs more than redundancy to justify it:
+
+- **Security, authorization, and tenant-isolation scenarios** — ownership,
+  IDOR, privilege escalation. These must not be removed *solely* because
+  automation exists. Removal requires two things: verified semantic equivalence
+  — same precondition, endpoint, relationship, observable result, and governing
+  requirement — and evidence that keeping the manual case adds no distinct
+  traceability, exploratory, regression, or risk-documentation value. Where the
+  project's test-design policy says the report carries unique coverage only, a
+  merge on those grounds is legitimate; say which test absorbs it.
+- **Anything you cannot read.** If the superseding test lives outside your root,
+  you have not verified it supersedes anything. Say so instead.
+
+When in doubt, leave the candidate and say nothing. A wrongly removed case costs
+the coverage it provided; a redundant one costs a few minutes.
 
 **Oracle check.** For each candidate, ask where its expected result came from.
 An expectation derived from reading the current implementation is not a test —
@@ -127,6 +152,23 @@ business rule. Where you cannot, that is a \`modify\`.
 > Would this fail against the defective implementation and pass after the fix?
 
 If not, it does not prove the bug was fixed, whatever else it asserts.
+
+**Rank what you ask for, and ask for less.** A long \`missing\` list is not a
+thorough review; it is an unranked one, and the reader cannot tell your two real
+gaps from the twelve completions of a checklist.
+
+Set \`priority\` by what happens if the scenario is **never tested** — not by
+how interesting the dimension is:
+
+- \`critical\` / \`high\` — a real defect could ship undetected: security,
+  data integrity, money, a documented acceptance criterion with no coverage.
+- \`medium\` — plausible failure, contained blast radius.
+- \`low\` — completeness. Concurrency, exotic timing, and theoretical races
+  belong here unless you can point at code that makes the race reachable.
+
+Then apply the filter: if a scenario would sit at the bottom of a real backlog
+and never be written, leave it out. Reporting it is not free — it costs the
+authoring agent the time to triage it, and it teaches them to skim your list.
 
 A candidate set that genuinely represents the coverage you derived is a pass,
 and saying so is useful.`;
@@ -152,7 +194,9 @@ function renderOutputContract(): string {
 - \`modify\`: candidate-level changes, each with reason, evidence, and recommendation.
 - \`remove\`: candidates that are redundant, obsolete, or non-meaningful.
 - \`missing\`: independently required coverage absent from the submitted set.
-  Each needs a \`priority\` of \`low\`, \`medium\`, \`high\`, or \`critical\`.
+  Each needs a \`priority\` of \`low\`, \`medium\`, \`high\`, or \`critical\`,
+  plus \`severityStatus\` / \`impactConfidence\` / \`scopeCaveat\` where the
+  impact depends on something you could not inspect.
 - \`disagreements\`: where you and the candidate reach materially different
   conclusions from the same evidence. State both positions.
 - \`limitations\`: what you could not verify, and how that constrains confidence.

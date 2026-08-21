@@ -11,6 +11,7 @@ import { CodexMcpError, toCodexMcpError } from '../errors/codex-mcp-error.js';
 import { ErrorCodes } from '../errors/codes.js';
 import { AutoConsentGate, type ConsentGate } from '../policy/consent.js';
 import { PermissionEngine } from '../policy/permission-engine.js';
+import { detectNarrowedScope } from '../evidence/scope.js';
 import { MEMORY_CONTEXT_LIMIT, ProjectMemoryStore, memoryStateDir } from '../memory/project-memory.js';
 import type { PromptContext } from '../prompts/base-reviewer.js';
 import {
@@ -210,8 +211,19 @@ export class ReviewOrchestrator {
       const database = planDatabaseEvidence(dbConnectors);
       const broker = buildBrokerLaunchSpec(this.config, external.connectors);
 
+      // The client launches this server with its workspace as the cwd, so a
+      // root below it means the caller narrowed scope — possibly without meaning to.
+      const scopeNotice = detectNarrowedScope(projectRoot, this.config.sources.cwd);
+      if (scopeNotice) {
+        logger.info('review scoped below the workspace root', {
+          scopedTo: scopeNotice.scopedTo,
+          unreachableSiblings: scopeNotice.unreachableSiblings.length,
+        });
+      }
+
       const context: PromptContext = {
         projectRoot,
+        ...(scopeNotice ? { scopeNotice } : {}),
         ...(request.project.branch ? { branch: request.project.branch } : {}),
         ...(request.project.note ? { projectNote: request.project.note } : {}),
         repository,

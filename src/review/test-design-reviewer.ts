@@ -61,7 +61,7 @@ export async function reviewTestDesign(input: TestDesignReviewInput): Promise<Te
 export function normalizeTestReview(
   result: TestReviewResult,
   candidates: readonly CandidateTestCase[],
-  context: Pick<PromptContext, 'requirement' | 'external' | 'database'>,
+  context: Pick<PromptContext, 'requirement' | 'external' | 'database' | 'scopeNotice'>,
 ): TestReviewResult {
   const knownIds = new Set(candidates.map((candidate) => candidate.id));
   const limitations = [...result.limitations];
@@ -88,6 +88,7 @@ export function normalizeTestReview(
       detail: `The reviewer referenced candidate ids that were not supplied and they were dropped: ${[...new Set(unknownReferences)].join(', ')}.`,
       impact: 'Those references could not be acted on; the corresponding candidates may be unreviewed.',
       material: false,
+      affects: [...new Set(unknownReferences)],
     });
   }
 
@@ -99,6 +100,7 @@ export function normalizeTestReview(
       detail: `The reviewer returned no verdict for: ${unreviewed.join(', ')}.`,
       impact: 'Treat these as unreviewed rather than accepted.',
       material: false,
+      affects: unreviewed,
     });
   }
 
@@ -124,15 +126,31 @@ export function normalizeTestReview(
 
 /** Evidence gaps codex-mcp already knows about, folded into the result. */
 function inheritedLimitations(
-  context: Pick<PromptContext, 'requirement' | 'external' | 'database'>,
+  context: Pick<PromptContext, 'requirement' | 'external' | 'database' | 'scopeNotice'>,
 ): Limitation[] {
   // Not material: a skipped connector or an unread ticket constrains the review
   // without invalidating it. Only the reviewer can say a gap actually prevented
   // a judgment, and it does that by setting `material` itself.
   const entries: Limitation[] = [];
-  for (const detail of context.requirement.limitations) entries.push({ area: 'requirement', detail, material: false });
-  for (const detail of context.external.limitations) entries.push({ area: 'external-evidence', detail, material: false });
-  for (const detail of context.database.limitations) entries.push({ area: 'database', detail, material: false });
+  for (const detail of context.requirement.limitations) entries.push({ area: 'requirement', detail, material: false, affects: [] });
+  for (const detail of context.external.limitations) entries.push({ area: 'external-evidence', detail, material: false, affects: [] });
+  for (const detail of context.database.limitations) entries.push({ area: 'database', detail, material: false, affects: [] });
+
+  // Recorded whether or not the reviewer noticed: the caller chose a root below
+  // its own workspace, and a silent blind spot is the failure mode here.
+  if (context.scopeNotice) {
+    entries.push({
+      area: 'review-scope',
+      detail:
+        `The review was rooted at "${context.scopeNotice.scopedTo}", below the workspace. ` +
+        `Not visible to the reviewer: ${context.scopeNotice.unreachableSiblings.join(', ')}.`,
+      impact:
+        'Findings that depend on a sibling directory could not be checked. Re-run with the workspace root if any of them consume or gate this code.',
+      material: false,
+      affects: [],
+    });
+  }
+
   return entries;
 }
 

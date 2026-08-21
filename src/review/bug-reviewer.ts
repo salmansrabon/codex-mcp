@@ -59,7 +59,7 @@ export async function reviewBugs(input: BugReviewInput): Promise<BugReviewOutput
 export function normalizeBugReview(
   result: BugReviewResult,
   candidates: readonly CandidateBug[],
-  context: Pick<PromptContext, 'requirement' | 'external' | 'database'>,
+  context: Pick<PromptContext, 'requirement' | 'external' | 'database' | 'scopeNotice'>,
 ): BugReviewResult {
   const knownIds = new Set(candidates.map((candidate) => candidate.id));
   const limitations = [...result.limitations];
@@ -76,6 +76,7 @@ export function normalizeBugReview(
       area: 'review-integrity',
       detail: `The reviewer returned verdicts for ids that were not submitted and they were dropped: ${[...new Set(unknownReferences)].join(', ')}.`,
       material: false,
+      affects: [...new Set(unknownReferences)],
     });
   }
 
@@ -91,14 +92,28 @@ export function normalizeBugReview(
       evidence: [],
       recommendation: 'Treat this finding as unverified and verify it independently before publishing.',
       missingEvidence: [],
+      severityStatus: 'CONFIRMED',
     });
   }
 
   // Not material: these constrain the review without invalidating it. Only the
   // reviewer can say a gap actually blocked a verdict.
-  for (const detail of context.requirement.limitations) limitations.push({ area: 'requirement', detail, material: false });
-  for (const detail of context.external.limitations) limitations.push({ area: 'external-evidence', detail, material: false });
-  for (const detail of context.database.limitations) limitations.push({ area: 'database', detail, material: false });
+  for (const detail of context.requirement.limitations) limitations.push({ area: 'requirement', detail, material: false, affects: [] });
+  for (const detail of context.external.limitations) limitations.push({ area: 'external-evidence', detail, material: false, affects: [] });
+  for (const detail of context.database.limitations) limitations.push({ area: 'database', detail, material: false, affects: [] });
+
+  if (context.scopeNotice) {
+    limitations.push({
+      area: 'review-scope',
+      detail:
+        `The review was rooted at "${context.scopeNotice.scopedTo}", below the workspace. ` +
+        `Not visible to the reviewer: ${context.scopeNotice.unreachableSiblings.join(', ')}.`,
+      impact:
+        'A defect that depends on a sibling directory could not be confirmed or refuted from this root.',
+      material: false,
+      affects: [],
+    });
+  }
 
   const summary = {
     verified: findings.filter((f) => f.verdict === 'VERIFIED').length,

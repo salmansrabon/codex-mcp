@@ -4,6 +4,7 @@ import type { ExternalEvidence } from '../evidence/external-mcp.js';
 import type { GitEvidence } from '../evidence/git.js';
 import type { RequirementEvidence } from '../evidence/jira.js';
 import type { RepositoryEvidence } from '../evidence/repository.js';
+import { renderScopeNotice, type ScopeNotice } from '../evidence/scope.js';
 import { renderProjectMemory, type StoredFact } from '../memory/project-memory.js';
 
 /** Verbatim base prompt from PLAN.md §21. */
@@ -146,6 +147,41 @@ relying on them.
 
 "The authoring agent said X" is never evidence for X.`;
 
+export const PROVISIONAL_SEVERITY = `## Say when a judgment outruns what you can see
+
+Severity and priority are claims about *impact*, and impact usually lives
+somewhere other than the code that produces it. A missing check in a handler is
+critical if anything reaches it unguarded, and a non-issue if every caller
+already blocks the case — and the callers may be somewhere you cannot read.
+
+So before assigning any severity or priority, ask what would have to be true
+elsewhere for it to be wrong.
+
+**Do not lower the severity because your scope was incomplete.** Definitive
+evidence of a critical defect in the code you can read is critical, whether or
+not you saw the caller. Downgrading it would understate a real risk and hide the
+actual problem, which is not the severity — it is your confidence in the impact.
+
+Record that separately instead:
+
+- \`severityStatus\` — \`CONFIRMED\` when you traced what the impact depends
+  on; \`PROVISIONAL\` when a component you could not inspect could materially
+  change it.
+- \`impactConfidence\` — how sure you are of the *impact*, which is a different
+  question from whether the finding is real. A confirmed missing check with an
+  unknown caller set is high confidence in the defect, low in the blast radius.
+- \`scopeCaveat\` — the specific thing you could not inspect that would settle
+  it. Not "limited scope"; name the directory, the service, or the file.
+- and a \`limitations\` entry whose \`affects\` lists that finding's id.
+
+A limitation nobody can attach to a finding is boilerplate; it gets skimmed, and
+the confident severity next to it is what the reader acts on. Attach it.
+
+Never write a flat assertion where the evidence supports a conditional one.
+"The controller performs no ownership check" is a fact about one file.
+"Any user can therefore access another tenant's data" is a claim about the whole
+call path, and you may not have seen the whole call path.`;
+
 export const MATERIALITY = `## Material findings only
 
 Raise: a wrong expected result, a missed acceptance criterion, a false-positive
@@ -287,6 +323,8 @@ export interface PromptContext {
   external: ExternalEvidence;
   /** Verified facts carried over from earlier reviews of this project. */
   projectMemory?: readonly StoredFact[];
+  /** Set when the review root is below the workspace the client opened. */
+  scopeNotice?: ScopeNotice;
   focus?: string;
   pass: number;
   maxPasses: number;
@@ -338,6 +376,9 @@ tests, configuration, fixtures, documentation. The summary above is orientation,
 not evidence.
 
 Dot-files and dot-directories are part of the project and are yours to read.${conventions}${hidden}`);
+
+  const scope = renderScopeNotice(context.scopeNotice);
+  if (scope) sections.push(scope);
 
   sections.push(renderGit(context.git));
   sections.push(renderRequirement(context.requirement));
@@ -501,6 +542,7 @@ export function buildBasePrompt(context: PromptContext): string {
     CHANGE_TYPE_ANALYSIS,
     DEPENDENCY_ANALYSIS,
     ARTIFACT_SKEPTICISM,
+    PROVISIONAL_SEVERITY,
     MATERIALITY,
     RESULT_CONVENTIONS,
     renderContext(context),

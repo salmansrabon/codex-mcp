@@ -6,6 +6,7 @@ import {
   EvidenceSchema,
   LimitationSchema,
   MemoryFactSchema,
+  SeverityQualifierShape,
   ReviewStatusSchema,
 } from './review-common.js';
 
@@ -31,6 +32,7 @@ export const BugFindingSchema = z.object({
   recommendation: z.string().min(1),
   missingEvidence: z.array(z.string()).default([]),
   duplicateOf: z.string().optional(),
+  ...SeverityQualifierShape,
 });
 export type BugFinding = z.infer<typeof BugFindingSchema>;
 
@@ -40,6 +42,7 @@ export const AdditionalBugSchema = z.object({
   severity: z.string().optional(),
   reason: z.string().min(1),
   evidence: z.array(EvidenceSchema).default([]),
+  ...SeverityQualifierShape,
 });
 
 export const BugReviewResultSchema = z

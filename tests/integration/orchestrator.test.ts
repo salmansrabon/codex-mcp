@@ -304,6 +304,58 @@ describe('test-design review end to end', () => {
     }
   });
 
+  it('requires a severity that outruns the evidence to be hedged on the finding itself', async () => {
+    await makeOrchestrator().qualify({
+      reviewType: 'test-design',
+      project: { root: fixture.root },
+      candidate: { testCases: CANDIDATE_TEST_CASES },
+    });
+
+    const prompt = invocations()[0]?.prompt ?? '';
+    // The observed failure: a confident "critical" derived from one file, with
+    // a boilerplate limitation beside it that nobody connected to the finding.
+    expect(prompt).toContain('Say when a judgment outruns what you can see');
+    // Severity must NOT be downgraded for incomplete scope — that understates a
+    // real risk. The uncertainty belongs on impact confidence instead.
+    expect(prompt).toMatch(/Do not lower the severity because your scope was incomplete/);
+    expect(prompt).toContain('`severityStatus`');
+    expect(prompt).toContain('`impactConfidence`');
+    expect(prompt).toContain('`scopeCaveat`');
+    expect(prompt).toContain('`affects` lists that finding');
+    expect(prompt).toMatch(/limitation nobody can attach to a finding is boilerplate/);
+  });
+
+  it('sets a bar for removal that automated coverage alone does not clear', async () => {
+    await makeOrchestrator().qualify({
+      reviewType: 'test-design',
+      project: { root: fixture.root },
+      candidate: { testCases: CANDIDATE_TEST_CASES },
+    });
+
+    const prompt = invocations()[0]?.prompt ?? '';
+    expect(prompt).toContain('"An automated test already covers this" is not');
+    expect(prompt).toMatch(/same observable outcome under the same preconditions/);
+    // Protected, but not by another absolute: removal stays possible on
+    // verified semantic equivalence plus no distinct residual value.
+    expect(prompt).toMatch(/must not be removed \*solely\* because/);
+    expect(prompt).toMatch(/verified semantic equivalence/);
+    expect(prompt).toMatch(/traceability, exploratory, regression, or risk-documentation value/);
+  });
+
+  it('makes priority a statement about risk, and asks for fewer entries', async () => {
+    await makeOrchestrator().qualify({
+      reviewType: 'test-design',
+      project: { root: fixture.root },
+      candidate: { testCases: CANDIDATE_TEST_CASES },
+    });
+
+    const prompt = invocations()[0]?.prompt ?? '';
+    expect(prompt).toMatch(/Rank what you ask for, and ask for less/);
+    expect(prompt).toMatch(/what happens if the scenario is \*\*never tested\*\*/);
+    // Concurrency was the concrete over-reach: reported without a reachable race.
+    expect(prompt).toMatch(/Concurrency, exotic timing, and theoretical races/);
+  });
+
   it('includes optional artifacts when present', async () => {
     await makeOrchestrator().qualify({
       reviewType: 'test-design',

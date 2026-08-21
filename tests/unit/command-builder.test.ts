@@ -82,6 +82,14 @@ describe('buildCodexArgs', () => {
     expect(args).toContain('mcp_servers.evidence.args=["/x/cli.js","broker"]');
   });
 
+  it('pre-approves the broker so approval_policy="never" cannot void every tool call', () => {
+    // Codex 0.149 refuses an unapproved MCP call outright under
+    // approval_policy="never", which loses all connector evidence silently.
+    // Scoped to the broker: it advertises only policy-approved read tools.
+    const args = build({}, { broker: { name: 'evidence', command: 'node', args: [] } });
+    expect(args).toContain('mcp_servers.evidence.default_tools_approval_mode="approve"');
+  });
+
   it('quotes broker arguments so paths with spaces survive TOML parsing', () => {
     const args = build({}, { broker: { name: 'evidence', command: '/a b/node', args: ['/c d/cli.js'] } });
     expect(args).toContain('mcp_servers.evidence.command="/a b/node"');

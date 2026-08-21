@@ -5,6 +5,7 @@ import {
   EvidenceSchema,
   LimitationSchema,
   MemoryFactSchema,
+  SeverityQualifierShape,
   PrioritySchema,
   ReviewStatusSchema,
 } from './review-common.js';
@@ -17,6 +18,7 @@ export const ModifyEntrySchema = z.object({
   evidence: z.array(EvidenceSchema).default([]),
   recommendation: z.string().min(1),
   severity: PrioritySchema.optional(),
+  ...SeverityQualifierShape,
 });
 
 export const RemoveEntrySchema = z.object({
@@ -33,6 +35,7 @@ export const MissingEntrySchema = z.object({
   evidence: z.array(EvidenceSchema).default([]),
   suggestedAssertion: z.string().optional(),
   dimension: z.string().optional().describe('Coverage dimension: boundary, authorization, concurrency, persistence, ...'),
+  ...SeverityQualifierShape,
 });
 
 export const TestReviewResultSchema = z

@@ -66,7 +66,19 @@ export const QualifyRequestSchema = z
     reviewType: ReviewTypeSchema,
 
     project: z.object({
-      root: z.string().min(1).describe('Absolute path to the repository or workspace Codex should inspect.'),
+      /**
+       * In a monorepo this is the trap: "the repository" reads as the
+       * individual git repo, and scoping there hides every sibling package.
+       * The workspace root is almost always the right answer.
+       */
+      root: z
+        .string()
+        .min(1)
+        .describe(
+          'Absolute path to the workspace root Codex should inspect — normally the directory you have open, ' +
+            'the one containing .mcp.json. Everything under it is in scope; anything beside it is not. ' +
+            'Scope to a subdirectory only when you are certain no finding can span its siblings.',
+        ),
       /**
        * The ref to diff *against*, not the branch under review — the reviewer
        * always reads the checked-out working tree. Set it to the PR's base

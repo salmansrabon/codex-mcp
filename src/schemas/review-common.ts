@@ -7,6 +7,33 @@ export type ReviewStatus = z.infer<typeof ReviewStatusSchema>;
 export const ConfidenceSchema = z.enum(['low', 'medium', 'high']);
 export const PrioritySchema = z.enum(['low', 'medium', 'high', 'critical']);
 
+/**
+ * Whether a severity or priority is settled, or still conditional on evidence
+ * the reviewer could not reach.
+ *
+ * Downgrading a severity because scope was incomplete is the wrong correction:
+ * definitive evidence of unauthenticated RCE in the code you *can* read is
+ * critical whether or not you saw the frontend. What is uncertain is the impact
+ * assessment, not the finding. So the severity stays as the available evidence
+ * justifies it, and the uncertainty is recorded beside it.
+ */
+export const SeverityStatusSchema = z.enum(['CONFIRMED', 'PROVISIONAL']);
+export type SeverityStatus = z.infer<typeof SeverityStatusSchema>;
+
+/** Fields any severity- or priority-bearing entry carries. */
+export const SeverityQualifierShape = {
+  severityStatus: SeverityStatusSchema.default('CONFIRMED').describe(
+    'PROVISIONAL when a component you could not inspect could materially change the impact.',
+  ),
+  impactConfidence: ConfidenceSchema.optional().describe(
+    'Confidence in the impact assessment specifically, as distinct from confidence that the finding is real.',
+  ),
+  scopeCaveat: z
+    .string()
+    .optional()
+    .describe('What you could not inspect that could change the impact. Required reading when severityStatus is PROVISIONAL.'),
+} as const;
+
 export const EvidenceSchema = z.object({
   source: z.string().min(1),
   location: z.string().min(1),
@@ -29,6 +56,14 @@ export const LimitationSchema = z.object({
    * the normal outcome of any partially-connected setup.
    */
   material: z.boolean().default(false),
+  /**
+   * Ids of the findings this gap actually undermines.
+   *
+   * A limitation nobody can attach to a finding reads as boilerplate and gets
+   * skimmed. Naming the findings turns "I could not see the callers" into a
+   * hedge on the specific severity that depended on them.
+   */
+  affects: z.array(z.string()).default([]),
 });
 export type Limitation = z.infer<typeof LimitationSchema>;
 

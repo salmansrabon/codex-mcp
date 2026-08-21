@@ -58,6 +58,16 @@ export function buildCodexArgs(options: BuildCodexArgsOptions): string[] {
     if (broker.env && Object.keys(broker.env).length > 0) {
       args.push('-c', `${prefix}.env=${tomlInlineTable(broker.env)}`);
     }
+
+    // Codex 0.149 gates every MCP tool call behind an approval, and
+    // `approval_policy="never"` above turns that gate into a hard failure:
+    // each brokered call comes back as "MCP tool call requires approval, but
+    // approval policy is never", so the review silently loses all connector
+    // evidence. Pre-approving this one server restores it. It does not widen
+    // what Codex may call — the broker only ever advertises tools that
+    // capability-classifier ruled `read` and mcp-policy allowed, so approval
+    // here is a decision about a set codex-mcp already vetted.
+    args.push('-c', `${prefix}.default_tools_approval_mode="approve"`);
   }
 
   // The prompt itself arrives on stdin; `-` makes that explicit.

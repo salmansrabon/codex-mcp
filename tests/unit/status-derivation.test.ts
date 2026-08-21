@@ -2,8 +2,9 @@ import { describe, expect, it } from 'vitest';
 
 import { deriveBugReviewStatus } from '../../src/review/bug-reviewer.js';
 import { deriveTestReviewStatus } from '../../src/review/test-design-reviewer.js';
-import type { BugFinding } from '../../src/schemas/bug-review-result.js';
-import type { Disagreement, Limitation } from '../../src/schemas/review-common.js';
+import { BugFindingSchema, type BugFinding } from '../../src/schemas/bug-review-result.js';
+import { LimitationSchema, type Disagreement, type Limitation } from '../../src/schemas/review-common.js';
+import { MissingEntrySchema } from '../../src/schemas/test-review-result.js';
 
 /**
  * Status is derived in code because the reviewer's own grade is unreliable: a
@@ -126,5 +127,48 @@ describe('deriveBugReviewStatus', () => {
   it('never returns PASS while a material disagreement is unresolved', () => {
     const status = deriveBugReviewStatus({ ...clean, disagreements: [disagreement()] }, [finding('VERIFIED')], []);
     expect(status).toBe('CHANGES_REQUIRED');
+  });
+});
+
+describe('severity qualifiers', () => {
+  it('defaults a finding to CONFIRMED so silence never reads as provisional', () => {
+    const parsed = BugFindingSchema.parse({
+      candidateId: 'BUG-1',
+      verdict: 'VERIFIED',
+      confidence: 'high',
+      reason: 'r',
+      recommendation: 'keep',
+    });
+    expect(parsed.severityStatus).toBe('CONFIRMED');
+    expect(parsed.impactConfidence).toBeUndefined();
+  });
+
+  it('keeps a critical severity while marking the impact provisional', () => {
+    // The point of the split: incomplete scope must not downgrade a defect that
+    // the reachable evidence already establishes as critical.
+    const parsed = MissingEntrySchema.parse({
+      title: 'Unauthenticated access to the admin endpoint',
+      priority: 'critical',
+      reason: 'No auth middleware on the route.',
+      severityStatus: 'PROVISIONAL',
+      impactConfidence: 'low',
+      scopeCaveat: 'sharebox-webadmin was outside the review root; its callers were not inspected.',
+    });
+    expect(parsed.priority).toBe('critical');
+    expect(parsed.severityStatus).toBe('PROVISIONAL');
+    expect(parsed.impactConfidence).toBe('low');
+  });
+
+  it('lets a limitation name the findings it undermines', () => {
+    const parsed = LimitationSchema.parse({
+      area: 'review-scope',
+      detail: 'sharebox-webadmin was not visible.',
+      affects: ['TC-04', 'BUG-02'],
+    });
+    expect(parsed.affects).toEqual(['TC-04', 'BUG-02']);
+  });
+
+  it('defaults affects to empty rather than undefined, so callers can iterate', () => {
+    expect(LimitationSchema.parse({ area: 'requirement', detail: 'x' }).affects).toEqual([]);
   });
 });
