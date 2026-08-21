@@ -22,7 +22,7 @@ export const DEFAULTS = {
   sandbox: 'read-only' as SandboxMode,
   reasoningEffort: 'high' as ReasoningEffort,
   ephemeral: true,
-  maxPasses: 2,
+  maxPasses: 1,
   reviewTimeoutMs: 900_000,
   maxConcurrentReviews: 2,
   maxArtifactBytes: 200_000,
@@ -83,6 +83,9 @@ export interface Config {
 
   readonly connectors: Readonly<Record<string, ConnectorConfig>>;
   readonly logLevel: LogLevel;
+
+  /** Whether codex-mcp keeps verified project facts between reviews. */
+  readonly memoryEnabled: boolean;
 
   /** Non-fatal problems found while loading; surfaced by `doctor`. */
   readonly warnings: readonly string[];
@@ -366,6 +369,10 @@ export function loadConfig(options: LoadConfigOptions = {}): Config {
     connectors[name] = buildConnector(name, input, env, warnings);
   }
 
+  // Memory writes go to codex-mcp's own state directory, never the project, but
+  // an operator who wants the server to hold nothing between reviews can say so.
+  const memoryEnabled = envBoolean(env, 'PROJECT_MEMORY_ENABLED') ?? file.memory?.enabled ?? true;
+
   const projectRead = envBoolean(env, 'PROJECT_READ_ENABLED') ?? file.permissions?.project?.read ?? true;
   const gitRead = envBoolean(env, 'GIT_READ_ENABLED') ?? file.permissions?.git?.read ?? true;
   const projectWrite = file.permissions?.project?.write ?? false;
@@ -376,6 +383,7 @@ export function loadConfig(options: LoadConfigOptions = {}): Config {
 
   return {
     authMode,
+    memoryEnabled,
     codexBinary: envString(env, 'CODEX_BINARY') ?? file.auth?.codexBinary ?? DEFAULTS.codexBinary,
     ...(model ? { model } : {}),
     requireModel: envBoolean(env, 'CODEX_REQUIRE_MODEL') ?? file.review?.requireModel ?? false,

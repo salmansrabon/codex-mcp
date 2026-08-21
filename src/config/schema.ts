@@ -100,6 +100,11 @@ export const FileConfigSchema = z
 
     connectors: z.record(ConnectorConfigSchema).optional(),
 
+    memory: z
+      .object({
+        enabled: z.boolean().optional(),
+      })
+      .optional(),
     logging: z
       .object({
         level: z.enum(['error', 'warn', 'info', 'debug', 'trace']).optional(),

@@ -1,6 +1,13 @@
 import { z } from 'zod';
 
-import { DisagreementSchema, EvidenceSchema, LimitationSchema, PrioritySchema, ReviewStatusSchema } from './review-common.js';
+import {
+  DisagreementSchema,
+  EvidenceSchema,
+  LimitationSchema,
+  MemoryFactSchema,
+  PrioritySchema,
+  ReviewStatusSchema,
+} from './review-common.js';
 
 /** Test-design review delta (PLAN.md §13.1). */
 
@@ -45,6 +52,8 @@ export const TestReviewResultSchema = z
     missing: z.array(MissingEntrySchema).default([]),
     disagreements: z.array(DisagreementSchema).default([]),
     limitations: z.array(LimitationSchema).default([]),
+    /** Durable facts the server should remember for the next review of this project. */
+    projectMemory: z.array(MemoryFactSchema).default([]),
     /** Short narrative for a human skimming the result. Never a rewritten report. */
     reviewerNotes: z.string().optional(),
   })

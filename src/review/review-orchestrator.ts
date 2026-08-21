@@ -11,6 +11,7 @@ import { CodexMcpError, toCodexMcpError } from '../errors/codex-mcp-error.js';
 import { ErrorCodes } from '../errors/codes.js';
 import { AutoConsentGate, type ConsentGate } from '../policy/consent.js';
 import { PermissionEngine } from '../policy/permission-engine.js';
+import { MEMORY_CONTEXT_LIMIT, ProjectMemoryStore, memoryStateDir } from '../memory/project-memory.js';
 import type { PromptContext } from '../prompts/base-reviewer.js';
 import {
   QualifyRequestSchema,
@@ -32,6 +33,8 @@ const SUPPORTED_REVIEW_TYPES = ReviewTypeSchema.options;
 export interface ReviewOrchestratorOptions {
   config: Config;
   logger: Logger;
+  /** Override the project-memory directory. Tests use this to stay off real state. */
+  memoryStateDir?: string;
   authManager: AuthManager;
   /** Injectable for tests; defaults to a real CodexRunner. */
   runner?: CodexRunner;
@@ -56,6 +59,7 @@ export interface ReviewOrchestratorOptions {
 export class ReviewOrchestrator {
   private readonly config: Config;
   private readonly logger: Logger;
+  private readonly memory: ProjectMemoryStore;
   private readonly authManager: AuthManager;
   private readonly permissions: PermissionEngine;
   private readonly runner: CodexRunner;
@@ -69,6 +73,15 @@ export class ReviewOrchestrator {
     this.authManager = options.authManager;
     this.permissions = new PermissionEngine(options.config);
     this.runner = options.runner ?? new CodexRunner({ config: options.config, logger: options.logger });
+    // Memory is codex-mcp's own state, written outside the sandbox and never
+    // into the project. Without a resolvable state directory it stays disabled
+    // rather than guessing a location.
+    const stateDir = options.memoryStateDir ?? memoryStateDir();
+    this.memory = new ProjectMemoryStore({
+      stateDir: stateDir ?? '',
+      logger: options.logger,
+      enabled: Boolean(stateDir) && options.config.memoryEnabled,
+    });
     this.consent =
       options.consent ??
       new AutoConsentGate(false, 'No interactive client was available to approve external evidence access.');
@@ -179,13 +192,14 @@ export class ReviewOrchestrator {
       useExternalMcps: request.options?.useExternalMcps ?? true,
     };
 
-    const [repository, git, artifacts, external] = await Promise.all([
+    const [repository, git, artifacts, external, projectMemory] = await Promise.all([
       collectRepositoryEvidence(projectRoot),
       this.config.permissions.gitRead
         ? collectGitEvidence(projectRoot, logger, request.project.branch)
         : Promise.resolve({ available: false, notes: ['Git read access is disabled by configuration.'] }),
       collectArtifacts(projectRoot, this.permissions, request.artifacts ?? {}, this.config.maxArtifactBytes),
       collectExternalEvidence(this.config, this.permissions, selection, logger, this.consent, reviewId),
+      this.memory.retrieve(projectRoot, MEMORY_CONTEXT_LIMIT),
     ]);
 
     try {
@@ -206,6 +220,7 @@ export class ReviewOrchestrator {
         artifacts,
         database,
         external: external.evidence,
+        projectMemory,
         ...(request.options?.focus ? { focus: request.options.focus } : {}),
         pass,
         maxPasses: this.config.maxPasses,
@@ -227,6 +242,14 @@ export class ReviewOrchestrator {
       const statuses: ReviewStatus[] = [];
       if (outcome.testDesign) statuses.push(outcome.testDesign.status);
       if (outcome.bugs) statuses.push(outcome.bugs.status);
+
+      // Persisted after validation, from data that already passed the schema.
+      // A memory failure must not fail a review that otherwise succeeded.
+      await this.memory
+        .persist(projectRoot, [...(outcome.testDesign?.projectMemory ?? []), ...(outcome.bugs?.projectMemory ?? [])])
+        .catch((error: unknown) => {
+          logger.warn('project memory not persisted', { error: error instanceof Error ? error.message : String(error) });
+        });
 
       const completedAt = new Date();
       const durationMs = completedAt.getTime() - startedAt.getTime();

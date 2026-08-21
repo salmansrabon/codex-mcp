@@ -22,6 +22,13 @@ export const LimitationSchema = z.object({
   area: z.string().min(1).describe('What could not be verified: requirement, database, runtime, external-system, ...'),
   detail: z.string().min(1),
   impact: z.string().optional(),
+  /**
+   * Whether this gap prevented a reliable assessment. Defaults to false: a
+   * skipped connector or an unread ticket is a recorded fact about the review,
+   * not a failed review, and defaulting the other way would make INCONCLUSIVE
+   * the normal outcome of any partially-connected setup.
+   */
+  material: z.boolean().default(false),
 });
 export type Limitation = z.infer<typeof LimitationSchema>;
 
@@ -33,5 +40,28 @@ export const DisagreementSchema = z.object({
   reviewerPosition: z.string().min(1),
   evidence: z.array(EvidenceSchema).default([]),
   resolutionHint: z.string().optional(),
+  /**
+   * Defaults to true, the opposite of `Limitation.material`: the reviewer is
+   * told to raise material findings only, so a disagreement it bothered to
+   * record is one the authoring agent has to adjudicate.
+   */
+  material: z.boolean().default(true),
 });
 export type Disagreement = z.infer<typeof DisagreementSchema>;
+
+/**
+ * A durable, verified fact about the project, proposed by the reviewer and
+ * persisted by codex-mcp between reviews.
+ *
+ * The Codex run itself is stateless and cannot remember anything; this is the
+ * reviewer handing a fact back for the server to keep. Only verified, durable
+ * knowledge belongs here — never an open question, a speculative finding, or
+ * anything read out of a credential.
+ */
+export const MemoryFactSchema = z.object({
+  topic: z.string().min(1).describe('Short subject line, e.g. "tenant ownership enforcement".'),
+  fact: z.string().min(1).describe('The durable knowledge, stated concisely.'),
+  evidence: z.array(EvidenceSchema).min(1).describe('What establishes it. A fact with no evidence is not verified.'),
+  implication: z.string().optional().describe('Why it matters for future changes or testing.'),
+});
+export type MemoryFact = z.infer<typeof MemoryFactSchema>;

@@ -10,10 +10,12 @@ import { isReadableDirectory, isReadableFile, pathExists } from './util/fs.js';
 /**
  * `codex-mcp init` — write codex-mcp's own configuration.
  *
- * This is the one place codex-mcp writes anything, and it is deliberately
- * outside the review path: the *reviewer* never writes, to the project or
- * anywhere else. This is the operator asking the CLI to set itself up, in the
- * operator's own config directory, before any review exists.
+ * One of only two places codex-mcp writes at all — the other being the
+ * project-memory store — and both write exclusively to codex-mcp's own
+ * directories. Nothing here, and nothing during a review, touches the target
+ * project or a connected source system. This is the operator asking the CLI to
+ * set itself up, in the operator's own config directory, before any review
+ * exists.
  *
  * It refuses to overwrite without `--force`, so re-running it cannot silently
  * discard a configuration someone has tuned.
@@ -161,7 +163,7 @@ function renderYaml(plan: InitPlan): string {
     '# overwrite it unless you pass --force.',
     '',
     'review:',
-    '  maxPasses: 2',
+    '  maxPasses: 1',
     '  sandbox: read-only',
     plan.model ? `  model: ${plan.model}` : '  # model: gpt-5.6-sol',
     plan.model ? '  requireModel: true' : '  # requireModel: true',

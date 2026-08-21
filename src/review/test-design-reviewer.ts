@@ -3,6 +3,7 @@ import type { BrokerLaunchSpec } from '../codex/command-builder.js';
 import { buildTestDesignPrompt } from '../prompts/test-design.js';
 import type { PromptContext } from '../prompts/base-reviewer.js';
 import type { CandidateTestCase } from '../schemas/qualify-request.js';
+import type { Limitation } from '../schemas/review-common.js';
 import { TestReviewResultSchema, type TestReviewResult } from '../schemas/test-review-result.js';
 import type { Logger } from '../util/logger.js';
 import { runStructuredReview } from './structured-review.js';
@@ -86,6 +87,7 @@ export function normalizeTestReview(
       area: 'review-integrity',
       detail: `The reviewer referenced candidate ids that were not supplied and they were dropped: ${[...new Set(unknownReferences)].join(', ')}.`,
       impact: 'Those references could not be acted on; the corresponding candidates may be unreviewed.',
+      material: false,
     });
   }
 
@@ -96,6 +98,7 @@ export function normalizeTestReview(
       area: 'coverage-of-review',
       detail: `The reviewer returned no verdict for: ${unreviewed.join(', ')}.`,
       impact: 'Treat these as unreviewed rather than accepted.',
+      material: false,
     });
   }
 
@@ -108,25 +111,62 @@ export function normalizeTestReview(
     missing: result.missing.length,
   };
 
-  // The reviewer's own status is advisory; the delta itself is authoritative.
-  const hasChanges = summary.modify + summary.remove + summary.missing > 0;
-  const status =
-    result.status === 'INCONCLUSIVE' || result.status === 'ERROR'
-      ? result.status
-      : hasChanges
-        ? 'CHANGES_REQUIRED'
-        : 'PASS';
-
-  return { ...result, status, accepted, modify, remove, summary, limitations };
+  return {
+    ...result,
+    status: deriveTestReviewStatus(result, summary, limitations),
+    accepted,
+    modify,
+    remove,
+    summary,
+    limitations,
+  };
 }
 
 /** Evidence gaps codex-mcp already knows about, folded into the result. */
 function inheritedLimitations(
   context: Pick<PromptContext, 'requirement' | 'external' | 'database'>,
-): { area: string; detail: string }[] {
-  const entries: { area: string; detail: string }[] = [];
-  for (const detail of context.requirement.limitations) entries.push({ area: 'requirement', detail });
-  for (const detail of context.external.limitations) entries.push({ area: 'external-evidence', detail });
-  for (const detail of context.database.limitations) entries.push({ area: 'database', detail });
+): Limitation[] {
+  // Not material: a skipped connector or an unread ticket constrains the review
+  // without invalidating it. Only the reviewer can say a gap actually prevented
+  // a judgment, and it does that by setting `material` itself.
+  const entries: Limitation[] = [];
+  for (const detail of context.requirement.limitations) entries.push({ area: 'requirement', detail, material: false });
+  for (const detail of context.external.limitations) entries.push({ area: 'external-evidence', detail, material: false });
+  for (const detail of context.database.limitations) entries.push({ area: 'database', detail, material: false });
   return entries;
+}
+
+/**
+ * The final status, derived here rather than taken from the reviewer.
+ *
+ * A model asked to grade its own output will sometimes return `PASS` alongside
+ * a delta that plainly requires action, so its self-assessment of *the delta*
+ * is advisory and the content decides.
+ *
+ * `ERROR` and `INCONCLUSIVE` are the exceptions, and they pass through. Both are
+ * statements about what the reviewer was able to do rather than about the delta,
+ * and nothing in the returned arrays can establish either one — a reviewer that
+ * could not assess reliably has no way to say so except by saying so.
+ */
+export function deriveTestReviewStatus(
+  result: Pick<TestReviewResult, 'status' | 'disagreements'>,
+  summary: { modify: number; remove: number; missing: number },
+  limitations: readonly Limitation[],
+): TestReviewResult['status'] {
+  if (result.status === 'ERROR') return 'ERROR';
+
+  // A gap the reviewer marked material means it could not assess reliably —
+  // that outranks the delta, because the delta may be incomplete for the same
+  // reason. An explicit INCONCLUSIVE says the same thing directly.
+  if (result.status === 'INCONCLUSIVE' || limitations.some((limitation) => limitation.material)) {
+    return 'INCONCLUSIVE';
+  }
+
+  const hasChanges = summary.modify + summary.remove + summary.missing > 0;
+  // An unresolved material disagreement is work the authoring agent must do,
+  // even when no delta entry accompanies it. Letting that normalize to PASS
+  // would hand back a clean bill of health with an open dispute attached.
+  const hasDisagreement = result.disagreements.some((disagreement) => disagreement.material);
+
+  return hasChanges || hasDisagreement ? 'CHANGES_REQUIRED' : 'PASS';
 }

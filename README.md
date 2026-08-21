@@ -30,7 +30,8 @@ Authoring agent reconciles, then writes the FINAL artifact
 
 **Contents** · [Install](#install) · [Connect to a project](#connect-to-a-project)
 · [Use it](#use-it) · [Configuration](#configuration)
-· [Evidence connectors](#evidence-connectors) · [Permission boundary](#the-permission-boundary)
+· [Evidence connectors](#evidence-connectors) · [GitHub](#reviewing-a-github-repository)
+· [Permission boundary](#the-permission-boundary)
 · [API contract](#the-contract) · [Troubleshooting](#troubleshooting) · [Testing](#testing)
 
 ---
@@ -315,11 +316,23 @@ Then **you** write the final artifact.
 
 ### Loop protection
 
-`review.maxPasses` (default `2`) caps the cycle. Pass 1 is the normal case;
-pass 2 exists for reviews that forced substantial high-risk changes. A request
-above the limit is refused, and `meta.furtherPassesAllowed` tells you when the
-budget is spent. Iterating until the two models agree is not the goal — agreement
-is cheap, and reaching it usually means one of them stopped thinking.
+There is no multi-turn handshake between the reviewer and the authoring agent.
+One `codex_qualify` call is one independent review returning one structured
+delta; reconciliation happens on your side.
+
+**`review.maxPasses` defaults to `1`.** A second pass carries no record of the
+first — no previous findings, no author responses, no revised candidate — so it
+is not a continuation, it is the same review run twice at full cost. Raising the
+limit is supported and will work; it just buys repeated work rather than
+progress. A request above the limit is refused, and `meta.furtherPassesAllowed`
+reports the budget.
+
+Real multi-pass review needs a continuation contract carrying `reviewId`,
+`previousFindings`, `authorResponses`, and `revisedCandidate`. That is deferred;
+see [Limitations](#known-limitations).
+
+Iterating until the two models agree is not the goal in any case — agreement is
+cheap, and reaching it usually means one of them stopped thinking.
 
 ---
 
@@ -393,7 +406,7 @@ a project, or in the shell for a one-off.
 | `review.reasoningEffort` | `CODEX_REASONING_EFFORT` | `high` |
 | `review.sandbox` | `CODEX_SANDBOX` | `read-only` |
 | `review.ephemeral` | `CODEX_EPHEMERAL` | `true` |
-| `review.maxPasses` | `MAX_REVIEW_PASSES` | `2` |
+| `review.maxPasses` | `MAX_REVIEW_PASSES` | `1` |
 | `review.timeoutMs` | `REVIEW_TIMEOUT_MS` | `900000` |
 | `review.maxConcurrentReviews` | `MAX_CONCURRENT_REVIEWS` | `2` |
 | `review.maxArtifactBytes` | `MAX_ARTIFACT_BYTES` | `200000` |
@@ -403,6 +416,7 @@ a project, or in the shell for a one-off.
 | `permissions.project.read` | `PROJECT_READ_ENABLED` | `true` |
 | `permissions.git.read` | `GIT_READ_ENABLED` | `true` |
 | `permissions.allowUnknownDownstreamTools` | *(none)* | `false` |
+| `memory.enabled` | `PROJECT_MEMORY_ENABLED` | `true` |
 | `logging.level` | `LOG_LEVEL` | `info` |
 
 Connector settings **invert** that precedence: the YAML wins, because it is
@@ -541,6 +555,159 @@ server being correct.
 
 ---
 
+## Project memory
+
+A Codex run is stateless: it cannot remember what a previous review of the same
+project established, so every review would otherwise rediscover the same
+business rules and ownership paths from scratch.
+
+The **server** remembers instead. The reviewer proposes durable facts in a
+`projectMemory` array; codex-mcp screens and stores them, and hands the relevant
+ones to the next review as evidence.
+
+```text
+~/.local/state/codex-mcp/          (or $XDG_STATE_HOME/codex-mcp)
+└── projects/
+    └── <projectRootId>/
+        └── memory.json
+```
+
+The id is the same hash reported as `meta.evidence.projectRootId`, so a stored
+file and a review result correlate without either recording the path.
+
+Three things keep this from becoming a liability:
+
+- **Nothing is written to your project.** The store lives in codex-mcp's own
+  state directory. The read-only guarantee is about your repository and your
+  external systems; it was never a claim that the server keeps no state.
+- **Nothing is written from inside the sandbox.** Codex still cannot write
+  anywhere. Persistence happens in the server process, after the review returns,
+  from data that already passed schema validation.
+- **Facts are screened before they are kept.** A proposed fact is rejected if it
+  carries no evidence, if it reads like a credential or secret, or if it is
+  hedged — `might`, `appears to`, `unverified`. Only settled knowledge is stored.
+
+A fact several reviews independently assert gets a confirmation count rather
+than a duplicate entry, and stored facts are handed back to the reviewer as
+evidence at the same level as a derived artifact: useful, and still checkable.
+Where the code now contradicts one, the code wins.
+
+Writes are atomic — written to a temporary file and renamed — so an interrupted
+write leaves the previous store intact rather than a truncated file that reads
+as "nothing remembered". A store that cannot be read or written degrades to
+empty; memory is an optimization, and failing a review over it would be the
+wrong trade.
+
+Turn it off with `memory.enabled: false` if you want the server to hold nothing
+between reviews. To clear one project, delete its directory under `projects/`.
+
+The invariant this preserves, stated exactly:
+
+> Qualification never modifies the target project or any connected source
+> system. codex-mcp writes only to its own config and state directories.
+
+---
+
+## Reviewing a GitHub repository
+
+**codex-mcp reviews a working copy on disk, not a URL.** There is no "paste a
+repo link" mode, and that is deliberate — the reviewer reads the code, the diff,
+the existing tests, and the project's own conventions, which means it needs the
+files. Point it at a clone.
+
+### A whole repository
+
+```bash
+git clone git@github.com:your-org/your-repo.git
+cd your-repo
+```
+
+Then ask your agent, with the absolute path:
+
+> Draft test cases for the checkout flow, then qualify them with codex-mcp using
+> `project.root` `/home/you/your-repo`.
+
+If `.mcp.json` lives in that repo, `project.root` is just the repo you already
+have open.
+
+### A pull request
+
+Check the PR branch out locally and tell codex-mcp what to diff **against**:
+
+```bash
+gh pr checkout 482          # or: git fetch origin pull/482/head:pr-482 && git switch pr-482
+```
+
+```json
+{
+  "reviewType": "combined",
+  "project": { "root": "/home/you/your-repo", "branch": "origin/main" },
+  "task": { "id": "DEV-2951", "source": "jira", "title": "Archive a resource" },
+  "candidate": { "testCases": [], "bugs": [] }
+}
+```
+
+`project.branch` is the **base ref**, not the branch under review. The reviewer
+always reads the checked-out tree; this tells it what to compare against, and it
+diffs `<base>...HEAD`. Omit it and codex-mcp tries `origin/HEAD`, `origin/main`,
+`origin/master`, `main`, then `master`, recording a limitation if none resolve.
+
+As a prompt:
+
+> I've checked out PR #482. Send my bug findings to codex-mcp with
+> `project.root` `/home/you/your-repo` and `project.branch` `origin/main`, then
+> show me what it refutes.
+
+Run `git fetch origin` first on a shallow or stale clone — without the base ref
+present locally, the diff falls back to the working tree only and the review
+loses the change set.
+
+### GitHub as an evidence source
+
+The clone gives codex-mcp the code. To also let it read issues and PR
+discussion, add a GitHub MCP server as a connector — it is brokered read-only
+like any other, and its write tools are withheld by policy:
+
+```yaml
+connectors:
+  github:
+    enabled: true
+    kind: custom
+    approval: once
+    transport: stdio
+    command: npx
+    args: ['-y', 'your-github-mcp-server']
+    env:
+      GITHUB_PERSONAL_ACCESS_TOKEN: ''
+```
+
+Use a **read-only token**. codex-mcp refuses every mutating tool it classifies,
+but a token that cannot write is the boundary that does not depend on this
+server being correct. Then run `codex-mcp doctor` and check the exposed/withheld
+counts:
+
+```text
+[  ok  ] Connector: github
+           9 read-only tool(s) exposed, 6 withheld by policy.
+```
+
+A tool with an unusual name may land in `deniedTools` as `unknown`; add it to
+that connector's `allowTools` if it is genuinely read-only.
+
+Set `kind: jira` instead of `custom` if you track requirements as GitHub issues
+and want `task.id` resolved through it — that is what makes the reviewer read
+the issue itself rather than trusting the description your agent passed in.
+
+### What it does not do
+
+- It will not clone for you, or accept `https://github.com/org/repo` as
+  `project.root`.
+- It will not post a review comment, approve a PR, or push anything. The delta
+  comes back to your agent; you write the final artifact.
+- Private submodules and LFS objects must already be fetched locally.
+
+---
+
 ## The permission boundary
 
 The central rule: **Codex may inspect broadly and mutate nothing.**
@@ -649,7 +816,7 @@ type. Everything else is optional and **never blocks a review**.
 {
   "reviewType": "test-design",
 
-  "project": { "root": "/absolute/path/to/project", "branch": "feature/DEV-123" },
+  "project": { "root": "/absolute/path/to/project", "branch": "origin/main" },
 
   "task": {
     "id": "DEV-123",
@@ -735,6 +902,15 @@ Artifact paths are resolved inside `project.root`; a path escaping it is refused
 ```
 
 `status`: `PASS` · `CHANGES_REQUIRED` · `INCONCLUSIVE` · `ERROR`
+
+**`status` is computed by codex-mcp, not reported by the model.** A model asked
+whether its own output requires action will sometimes say no while handing back
+a delta that plainly does. It is derived from the content: any `modify`,
+`remove`, `missing`, or material `disagreement` makes it `CHANGES_REQUIRED`; a
+material `limitation` or an unreachable verdict makes it `INCONCLUSIVE`. A
+review with an unresolved material disagreement can never come back `PASS`.
+`ERROR` and `INCONCLUSIVE` pass through when the reviewer sets them, since those
+are statements about what it was able to do rather than about the delta.
 
 `verdict`: `VERIFIED` · `FALSE_POSITIVE` · `NEEDS_MORE_EVIDENCE` ·
 `SEVERITY_DISAGREEMENT` · `DUPLICATE_OR_ALREADY_COVERED` · `INCONCLUSIVE`
@@ -968,6 +1144,22 @@ src/
   schemas/     public request and result contracts
   tools/       the three MCP tools
 ```
+
+---
+
+## Known limitations
+
+Deferred rather than hidden:
+
+- **No stateful continuation.** `maxPasses` defaults to `1` because a second
+  pass has no memory of the first. Multi-pass review needs a request carrying
+  `reviewId`, `previousFindings`, `authorResponses`, and `revisedCandidate`.
+- **Read scope is not confined to the project.** See
+  [read scope](#read-scope-is-wider-than-the-project). A container or VM with
+  only the project mounted is the only reliable bound today.
+- **Assembled prompts are large** — roughly 4.8k tokens for test-design and
+  5.4k for bug-review, before evidence. Nearly all of it is the coverage
+  dimensions and discovery checks, which are the substance of the review.
 
 ---
 

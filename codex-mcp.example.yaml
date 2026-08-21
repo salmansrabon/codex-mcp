@@ -14,8 +14,10 @@ review:
   # Discard Codex session state after each review.
   ephemeral: true
 
-  # Reject reviews past this pass, so a reconciliation loop cannot run forever.
-  maxPasses: 2
+  # Reviews allowed per candidate set. One is the MVP contract: a second pass
+  # carries no record of the first, so it re-derives from scratch rather than
+  # continuing. Raise it only if you want that repeated work.
+  maxPasses: 1
 
   # Hard stop for a single review, in milliseconds.
   timeoutMs: 900000
@@ -53,6 +55,11 @@ permissions:
 
   # Blanket relaxation for tools that cannot be classified read-only; prefer per-connector allowTools.
   allowUnknownDownstreamTools: false
+
+memory:
+  # Keep verified project facts between reviews, in codex-mcp's own state dir
+  # (XDG_STATE_HOME or ~/.local/state/codex-mcp). Never written to your project.
+  enabled: true
 
 logging:
   # error | warn | info | debug

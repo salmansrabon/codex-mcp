@@ -47,7 +47,8 @@ describe('loadConfig', () => {
     expect(config.sandbox).toBe('read-only');
     expect(config.ephemeral).toBe(true);
     expect(config.authMode).toBe('chatgpt');
-    expect(config.maxPasses).toBe(2);
+    // One pass is the MVP contract: a second carries no record of the first.
+    expect(config.maxPasses).toBe(1);
     expect(config.model).toBeUndefined();
     expect(config.permissions.projectWrite).toBe(false);
     expect(config.permissions.allowUnknownDownstreamTools).toBe(false);

@@ -1,6 +1,13 @@
 import { z } from 'zod';
 
-import { ConfidenceSchema, DisagreementSchema, EvidenceSchema, LimitationSchema, ReviewStatusSchema } from './review-common.js';
+import {
+  ConfidenceSchema,
+  DisagreementSchema,
+  EvidenceSchema,
+  LimitationSchema,
+  MemoryFactSchema,
+  ReviewStatusSchema,
+} from './review-common.js';
 
 /** Bug review verdicts (PLAN.md §13.2, §13.4). */
 
@@ -50,6 +57,8 @@ export const BugReviewResultSchema = z
     additionalFindings: z.array(AdditionalBugSchema).default([]),
     disagreements: z.array(DisagreementSchema).default([]),
     limitations: z.array(LimitationSchema).default([]),
+    /** Durable facts the server should remember for the next review of this project. */
+    projectMemory: z.array(MemoryFactSchema).default([]),
     reviewerNotes: z.string().optional(),
   })
   .strip();

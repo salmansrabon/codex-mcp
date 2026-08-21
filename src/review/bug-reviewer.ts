@@ -2,8 +2,9 @@ import type { CodexRunner } from '../codex/codex-runner.js';
 import type { BrokerLaunchSpec } from '../codex/command-builder.js';
 import type { PromptContext } from '../prompts/base-reviewer.js';
 import { buildBugReviewPrompt } from '../prompts/bug-review.js';
-import { BugReviewResultSchema, type BugReviewResult } from '../schemas/bug-review-result.js';
+import { BugReviewResultSchema, type BugFinding, type BugReviewResult } from '../schemas/bug-review-result.js';
 import type { CandidateBug } from '../schemas/qualify-request.js';
+import type { Limitation } from '../schemas/review-common.js';
 import type { Logger } from '../util/logger.js';
 import { runStructuredReview } from './structured-review.js';
 
@@ -74,6 +75,7 @@ export function normalizeBugReview(
     limitations.push({
       area: 'review-integrity',
       detail: `The reviewer returned verdicts for ids that were not submitted and they were dropped: ${[...new Set(unknownReferences)].join(', ')}.`,
+      material: false,
     });
   }
 
@@ -92,9 +94,11 @@ export function normalizeBugReview(
     });
   }
 
-  for (const detail of context.requirement.limitations) limitations.push({ area: 'requirement', detail });
-  for (const detail of context.external.limitations) limitations.push({ area: 'external-evidence', detail });
-  for (const detail of context.database.limitations) limitations.push({ area: 'database', detail });
+  // Not material: these constrain the review without invalidating it. Only the
+  // reviewer can say a gap actually blocked a verdict.
+  for (const detail of context.requirement.limitations) limitations.push({ area: 'requirement', detail, material: false });
+  for (const detail of context.external.limitations) limitations.push({ area: 'external-evidence', detail, material: false });
+  for (const detail of context.database.limitations) limitations.push({ area: 'database', detail, material: false });
 
   const summary = {
     verified: findings.filter((f) => f.verdict === 'VERIFIED').length,
@@ -105,9 +109,40 @@ export function normalizeBugReview(
     ).length,
   };
 
-  const needsAction = findings.some((finding) => finding.verdict !== 'VERIFIED') || result.additionalFindings.length > 0;
-  const inconclusiveOnly = findings.length > 0 && findings.every((finding) => finding.verdict === 'INCONCLUSIVE');
-  const status = result.status === 'ERROR' ? 'ERROR' : inconclusiveOnly ? 'INCONCLUSIVE' : needsAction ? 'CHANGES_REQUIRED' : 'PASS';
+  return { ...result, status: deriveBugReviewStatus(result, findings, limitations), findings, summary, limitations };
+}
 
-  return { ...result, status, findings, summary, limitations };
+/**
+ * The final status, derived here rather than taken from the reviewer.
+ *
+ * `INCONCLUSIVE` outranks `CHANGES_REQUIRED`: if any material verdict could not
+ * be reached, the set of findings that *were* reached is an incomplete picture,
+ * and reporting it as a settled list of required changes overstates it.
+ */
+export function deriveBugReviewStatus(
+  result: Pick<BugReviewResult, 'status' | 'additionalFindings' | 'disagreements'>,
+  findings: readonly BugFinding[],
+  limitations: readonly Limitation[],
+): BugReviewResult['status'] {
+  if (result.status === 'ERROR') return 'ERROR';
+
+  // Any verdict the reviewer could not reach makes the whole set provisional:
+  // the findings that *were* reached are an incomplete picture, and reporting
+  // them as a settled list of required changes overstates it. A material
+  // limitation, or an explicit INCONCLUSIVE, says the same thing.
+  const unresolved = findings.some(
+    (finding) => finding.verdict === 'NEEDS_MORE_EVIDENCE' || finding.verdict === 'INCONCLUSIVE',
+  );
+  if (result.status === 'INCONCLUSIVE' || unresolved || limitations.some((limitation) => limitation.material)) {
+    return 'INCONCLUSIVE';
+  }
+
+  const needsAction =
+    findings.some((finding) =>
+      ['FALSE_POSITIVE', 'SEVERITY_DISAGREEMENT', 'DUPLICATE_OR_ALREADY_COVERED'].includes(finding.verdict),
+    ) ||
+    result.additionalFindings.length > 0 ||
+    result.disagreements.some((disagreement) => disagreement.material);
+
+  return needsAction ? 'CHANGES_REQUIRED' : 'PASS';
 }
