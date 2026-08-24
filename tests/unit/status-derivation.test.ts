@@ -12,7 +12,23 @@ import { MissingEntrySchema } from '../../src/schemas/test-review-result.js';
  * handing back a delta that plainly does.
  */
 
-const NO_CHANGES = { modify: 0, remove: 0, missing: 0 };
+const NO_CHANGES = { modify: [], remove: [], missing: [] };
+
+/**
+ * A ranked missing entry. Status derivation reads `objectionPriority`, so a
+ * fixture that omitted it would be testing the schema default rather than the
+ * rule.
+ */
+function missing(overrides: Record<string, unknown> = {}) {
+  return MissingEntrySchema.parse({
+    title: 'cross-tenant read is untested',
+    priority: 'high',
+    reason: 'no candidate covers it',
+    uniqueRisk: 'another tenant can read this record and nothing would catch it',
+    objectionPriority: 'MUST_FIX',
+    ...overrides,
+  });
+}
 
 function disagreement(overrides: Partial<Disagreement> = {}): Disagreement {
   return {
@@ -63,14 +79,37 @@ describe('deriveTestReviewStatus', () => {
   });
 
   it('ignores the reviewer claiming PASS when the delta requires action', () => {
-    const status = deriveTestReviewStatus({ status: 'PASS', disagreements: [] }, { ...NO_CHANGES, missing: 1 }, []);
+    const status = deriveTestReviewStatus({ status: 'PASS', disagreements: [] }, { ...NO_CHANGES, missing: [missing()] }, []);
+    expect(status).toBe('CHANGES_REQUIRED');
+  });
+
+  it('does not block acceptance on OPTIONAL observations alone', () => {
+    // Ranking exists so a report cannot be padded into significance: an entry
+    // the reviewer itself called optional is a note, not required work.
+    const status = deriveTestReviewStatus(
+      { status: 'CHANGES_REQUIRED', disagreements: [] },
+      { ...NO_CHANGES, missing: [missing({ objectionPriority: 'OPTIONAL' })] },
+      [],
+    );
+    expect(status).toBe('PASS');
+  });
+
+  it('still blocks when a ranked entry sits alongside optional ones', () => {
+    const status = deriveTestReviewStatus(
+      { status: 'PASS', disagreements: [] },
+      {
+        ...NO_CHANGES,
+        missing: [missing({ objectionPriority: 'OPTIONAL' }), missing({ objectionPriority: 'SHOULD_FIX' })],
+      },
+      [],
+    );
     expect(status).toBe('CHANGES_REQUIRED');
   });
 
   it('returns INCONCLUSIVE when a limitation prevented a reliable assessment', () => {
     const status = deriveTestReviewStatus(
       { status: 'PASS', disagreements: [] },
-      { ...NO_CHANGES, missing: 3 },
+      { ...NO_CHANGES, missing: [missing(), missing(), missing()] },
       [limitation({ material: true })],
     );
     expect(status).toBe('INCONCLUSIVE');

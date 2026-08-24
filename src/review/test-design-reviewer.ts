@@ -7,6 +7,7 @@ import type { Limitation } from '../schemas/review-common.js';
 import { TestReviewResultSchema, type TestReviewResult } from '../schemas/test-review-result.js';
 import type { Logger } from '../util/logger.js';
 import { runStructuredReview } from './structured-review.js';
+import { gateTestReview } from './verification-gate.js';
 
 export interface TestDesignReviewInput {
   context: PromptContext;
@@ -15,6 +16,8 @@ export interface TestDesignReviewInput {
   logger: Logger;
   broker?: BrokerLaunchSpec;
   timeoutMs: number;
+  /** Depth-scaled effort, decided by the orchestrator from the change set. */
+  reasoningEffort?: string;
   signal?: AbortSignal;
 }
 
@@ -36,6 +39,7 @@ export async function reviewTestDesign(input: TestDesignReviewInput): Promise<Te
     projectRoot: input.context.projectRoot,
     ...(input.broker ? { broker: input.broker } : {}),
     timeoutMs: input.timeoutMs,
+    ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
     ...(input.signal ? { signal: input.signal } : {}),
     logger: input.logger,
     runner: input.runner,
@@ -61,7 +65,7 @@ export async function reviewTestDesign(input: TestDesignReviewInput): Promise<Te
 export function normalizeTestReview(
   result: TestReviewResult,
   candidates: readonly CandidateTestCase[],
-  context: Pick<PromptContext, 'requirement' | 'external' | 'database' | 'scopeNotice'>,
+  context: Pick<PromptContext, 'requirement' | 'external' | 'database' | 'scopeNotice' | 'constraints' | 'knownCoverage'>,
 ): TestReviewResult {
   const knownIds = new Set(candidates.map((candidate) => candidate.id));
   const limitations = [...result.limitations];
@@ -106,19 +110,34 @@ export function normalizeTestReview(
 
   limitations.push(...inheritedLimitations(context));
 
+  // Confidence, value, and ceiling rules are applied to the delta before the
+  // status is derived: a claim the gate downgrades must not have already been
+  // counted as required work on its way through.
+  const gated = gateTestReview({
+    modify,
+    remove,
+    missing: result.missing,
+    candidates,
+    ...(context.constraints?.maxTestCases !== undefined ? { maxTestCases: context.constraints.maxTestCases } : {}),
+    knownCoverageDeclared: (context.knownCoverage?.length ?? 0) > 0,
+  });
+  limitations.push(...gated.limitations);
+
   const summary = {
     accepted: accepted.length,
-    modify: modify.length,
-    remove: remove.length,
-    missing: result.missing.length,
+    modify: gated.modify.length,
+    remove: gated.remove.length,
+    missing: gated.missing.length,
   };
 
   return {
     ...result,
-    status: deriveTestReviewStatus(result, summary, limitations),
+    status: deriveTestReviewStatus(result, gated, limitations),
     accepted,
-    modify,
-    remove,
+    modify: gated.modify,
+    remove: gated.remove,
+    missing: gated.missing,
+    ...(gated.portfolio ? { portfolio: gated.portfolio } : {}),
     summary,
     limitations,
   };
@@ -168,7 +187,7 @@ function inheritedLimitations(
  */
 export function deriveTestReviewStatus(
   result: Pick<TestReviewResult, 'status' | 'disagreements'>,
-  summary: { modify: number; remove: number; missing: number },
+  delta: Pick<TestReviewResult, 'modify' | 'remove' | 'missing'>,
   limitations: readonly Limitation[],
 ): TestReviewResult['status'] {
   if (result.status === 'ERROR') return 'ERROR';
@@ -180,7 +199,15 @@ export function deriveTestReviewStatus(
     return 'INCONCLUSIVE';
   }
 
-  const hasChanges = summary.modify + summary.remove + summary.missing > 0;
+  // Only ranked work blocks acceptance. An `OPTIONAL` entry is by definition
+  // something the artifact survives without, so a review made only of
+  // observations is a pass with notes — otherwise every refinement the reviewer
+  // was invited to mention would read as a required change, which is the
+  // pressure that inflates these reports in the first place.
+  const blocking = [...delta.modify, ...delta.remove, ...delta.missing].filter(
+    (entry) => entry.objectionPriority !== 'OPTIONAL',
+  );
+  const hasChanges = blocking.length > 0;
   // An unresolved material disagreement is work the authoring agent must do,
   // even when no delta entry accompanies it. Letting that normalize to PASS
   // would hand back a clean bill of health with an open dispute attached.

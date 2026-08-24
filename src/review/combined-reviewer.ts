@@ -17,6 +17,8 @@ export interface CombinedReviewInput {
   logger: Logger;
   broker?: BrokerLaunchSpec;
   timeoutMs: number;
+  /** Depth-scaled effort; both passes of a combined review share it. */
+  reasoningEffort?: string;
   signal?: AbortSignal;
 }
 
@@ -57,6 +59,7 @@ export async function reviewCombined(input: CombinedReviewInput): Promise<Combin
       logger: input.logger,
       ...(input.broker ? { broker: input.broker } : {}),
       timeoutMs: input.timeoutMs,
+      ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
       ...(input.signal ? { signal: input.signal } : {}),
     });
     testDesign = outcome.result;
@@ -77,6 +80,7 @@ export async function reviewCombined(input: CombinedReviewInput): Promise<Combin
       logger: input.logger,
       ...(input.broker ? { broker: input.broker } : {}),
       timeoutMs: input.timeoutMs,
+      ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
       ...(input.signal ? { signal: input.signal } : {}),
     });
     bugs = outcome.result;

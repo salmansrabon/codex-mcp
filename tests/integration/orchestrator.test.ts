@@ -350,7 +350,8 @@ describe('test-design review end to end', () => {
     });
 
     const prompt = invocations()[0]?.prompt ?? '';
-    expect(prompt).toMatch(/Rank what you ask for, and ask for less/);
+    expect(prompt).toMatch(/Rank every objection, and resist padding/);
+    expect(prompt).toMatch(/Two separate rankings, and they answer different questions/);
     expect(prompt).toMatch(/what happens if the scenario is \*\*never tested\*\*/);
     // Concurrency was the concrete over-reach: reported without a reachable race.
     expect(prompt).toMatch(/Concurrency, exotic timing, and theoretical races/);

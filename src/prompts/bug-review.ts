@@ -88,8 +88,11 @@ you are tracing:
    and the direct evidence.
 4. **Now return to the candidate's argument and evidence, and try to falsify it.**
 
-Falsification stays first: attack the claim before you accept it. A large share
-of reported defects dissolve once a guard elsewhere in the path is accounted for.
+Falsification stays first, per the falsification rules above: attack the claim
+before you accept it, and record what you looked at. A large share of reported
+defects dissolve once a guard elsewhere in the path is accounted for — and the
+same is true of your own objections, which is why the contradiction search
+applies to the findings you raise, not only to the ones you receive.
 
 ### Phase 1 — Candidate verification
 
@@ -124,6 +127,13 @@ requirements, runtime behavior, database state, or another authoritative source.
 
 Confidence is about evidence quality, not tone. Use \`high\` only when you traced
 the relevant path and can cite what supports the verdict.
+
+\`VERIFIED\` at \`high\` confidence is a confirmation claim, and it carries the
+same cost as \`CONFIRMED\`: the path traced in \`verifiedPath\`, and a
+completed contradiction search in \`contradictionsChecked\`. Without them
+codex-mcp lowers both. Withdrawing an objection you could not sustain is a
+result, not a failure — record it as \`FALSE_POSITIVE\` or
+\`NEEDS_MORE_EVIDENCE\` and say what changed your mind.
 
 ### Phase 2 — Independent missed-bug discovery
 
@@ -165,6 +175,9 @@ function renderOutputContract(): string {
   re-scope, adjust severity, merge, gather specific evidence, or investigate a
   named unresolved contradiction.
 - \`evidence\`: cite what supports the verdict.
+- \`verifiedPath\` / \`contradictionsChecked\`: the hops you opened and the
+  refutations you went looking for. These are what license a high-confidence
+  verdict.
 - \`missingEvidence\`: only evidence that would materially change or settle the
   verdict.
 - Material evidence that conflicts with a candidate, or with another source,
@@ -174,11 +187,15 @@ function renderOutputContract(): string {
 ### Additional findings
 
 - \`additionalFindings\`: defects you found that no submitted candidate covers.
-- Each carries exactly four fields: \`title\`, \`severity\`, \`reason\`, and
-  \`evidence\`. There are no others, and invented keys are dropped.
+- Each carries \`title\`, \`severity\`, \`reason\`, \`evidence\`, and the
+  verification fields — \`verificationStatus\`, \`verifiedPath\`,
+  \`contradictionsChecked\`, \`objectionPriority\`, and the confidence
+  dimensions that apply. Invented keys are dropped.
+- A defect you found yourself gets the same falsification treatment as one you
+  were handed. An unfalsified discovery is a \`HYPOTHESIS\`.
 - Put the rest inside \`reason\`, in this order: expected behavior, actual
-  behavior, realistic preconditions, affected path or component, your
-  confidence, and why no submitted candidate already covers it.
+  behavior, realistic preconditions, affected path or component, and why no
+  submitted candidate already covers it.
 
 Do not pad this list. A missing test is not a bug, a code smell is not a bug,
 and a hypothetical risk is not a bug.

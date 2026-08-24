@@ -73,7 +73,21 @@ describe('normalizeTestReview', () => {
       testReview({
         status: 'PASS',
         accepted: ['TC-1', 'TC-2', 'TC-3'],
-        missing: [{ title: 'cross-tenant access', priority: 'high', reason: 'r', evidence: [] }],
+        missing: [
+          {
+            title: 'cross-tenant access',
+            priority: 'high',
+            reason: 'r',
+            evidence: [],
+            uniqueRisk: 'a second tenant can read the record',
+            objectionPriority: 'MUST_FIX',
+            coverageChecked: ['test/access.spec.ts'],
+            verificationStatus: 'PROVISIONAL',
+            verifiedPath: [],
+            contradictionsChecked: [],
+            displaces: [],
+          },
+        ],
       }),
       testCases,
       cleanContext,

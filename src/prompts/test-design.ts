@@ -48,6 +48,10 @@ export const TEST_DESIGN_DIMENSIONS = [
 
 /** Quality problems to look for within the candidate set. */
 export const TEST_QUALITY_CHECKS = [
+  'no oracle — no expected result at all, so nothing can fail',
+  'observation-only steps — "record what happens", "note the behavior": an instruction to look, not a verifiable expectation',
+  'deferred assertion — the expected result is a question for a human, e.g. "ask the product owner whether this is correct"',
+  'no failure signal — the case cannot distinguish a working system from a broken one',
   'test redundancy — two cases exercising the same state, risk, and observable contract',
   'weak assertions — asserting that an internal call happened rather than verifying the observable outcome',
   'implementation-coupled assertions — asserting internals that may change without behavior changing',
@@ -153,9 +157,10 @@ business rule. Where you cannot, that is a \`modify\`.
 
 If not, it does not prove the bug was fixed, whatever else it asserts.
 
-**Rank what you ask for, and ask for less.** A long \`missing\` list is not a
-thorough review; it is an unranked one, and the reader cannot tell your two real
-gaps from the twelve completions of a checklist.
+**Two separate rankings, and they answer different questions.**
+\`objectionPriority\` says what the authoring agent must do about your
+objection, per the ranking rules above. \`priority\` says how much the
+*scenario itself* matters to the product.
 
 Set \`priority\` by what happens if the scenario is **never tested** — not by
 how interesting the dimension is:
@@ -166,12 +171,11 @@ how interesting the dimension is:
 - \`low\` — completeness. Concurrency, exotic timing, and theoretical races
   belong here unless you can point at code that makes the race reachable.
 
-Then apply the filter: if a scenario would sit at the bottom of a real backlog
-and never be written, leave it out. Reporting it is not free — it costs the
-authoring agent the time to triage it, and it teaches them to skim your list.
+Then apply the value threshold from the rules above: name the unique risk, or
+leave the scenario out.
 
 A candidate set that genuinely represents the coverage you derived is a pass,
-and saying so is useful.`;
+and saying so is useful. So is a set you tried to improve and could not.`;
 }
 
 function renderCandidates(candidates: readonly CandidateTestCase[]): string {
@@ -197,6 +201,17 @@ function renderOutputContract(): string {
   Each needs a \`priority\` of \`low\`, \`medium\`, \`high\`, or \`critical\`,
   plus \`severityStatus\` / \`impactConfidence\` / \`scopeCaveat\` where the
   impact depends on something you could not inspect.
+  - \`uniqueRisk\`: the risk nothing else covers. Absent, the entry is demoted
+    to \`OPTIONAL\`.
+  - \`coverageChecked\`: the tests, suites, or declared coverage you searched
+    before calling it missing.
+  - \`displaces\`: under a stated case ceiling, what this addition should
+    replace, and why it is the better use of the slot.
+- On every \`modify\`, \`remove\`, and \`missing\` entry:
+  \`objectionPriority\`, \`verificationStatus\`, \`verifiedPath\`,
+  \`contradictionsChecked\`, and the confidence dimensions that apply.
+  \`CONFIRMED\` without a completed contradiction search is downgraded by
+  codex-mcp, so record the search you actually did.
 - \`disagreements\`: where you and the candidate reach materially different
   conclusions from the same evidence. State both positions.
 - \`limitations\`: what you could not verify, and how that constrains confidence.

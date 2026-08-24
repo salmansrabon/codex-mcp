@@ -28,6 +28,7 @@ import type { Logger } from '../util/logger.js';
 import { safePathIdentifier } from '../util/redact.js';
 import { buildBrokerLaunchSpec } from './broker-launcher.js';
 import { reviewCombined, worstStatus } from './combined-reviewer.js';
+import { assessReviewDepth } from './review-depth.js';
 
 const SUPPORTED_REVIEW_TYPES = ReviewTypeSchema.options;
 
@@ -221,6 +222,19 @@ export class ReviewOrchestrator {
         });
       }
 
+      // Depth is decided from the change set before the prompt exists, so the
+      // reviewer receives a budget rather than choosing one. A model asked how
+      // hard to think answers "hard", which is how a budget becomes advisory.
+      const depth = assessReviewDepth({
+        git,
+        artifacts,
+        candidateCount: testCases.length + bugs.length,
+        connectors: external.evidence.usable,
+        narrowedScope: Boolean(scopeNotice),
+        configuredEffort: this.config.reasoningEffort,
+      });
+      logger.info('review depth assessed', { depth: depth.depth, reasoningEffort: depth.reasoningEffort });
+
       const context: PromptContext = {
         projectRoot,
         ...(scopeNotice ? { scopeNotice } : {}),
@@ -233,6 +247,9 @@ export class ReviewOrchestrator {
         database,
         external: external.evidence,
         projectMemory,
+        ...(request.knownCoverage ? { knownCoverage: request.knownCoverage } : {}),
+        ...(request.constraints ? { constraints: request.constraints } : {}),
+        depth: { level: depth.depth, signals: depth.signals },
         ...(request.options?.focus ? { focus: request.options.focus } : {}),
         pass,
         maxPasses: this.config.maxPasses,
@@ -248,6 +265,7 @@ export class ReviewOrchestrator {
         logger,
         ...(broker ? { broker } : {}),
         timeoutMs,
+        reasoningEffort: depth.reasoningEffort,
         ...(signal ? { signal } : {}),
       });
 
@@ -274,8 +292,10 @@ export class ReviewOrchestrator {
         ...(outcome.bugs ? { bugs: outcome.bugs } : {}),
         meta: {
           ...(this.config.model ? { model: this.config.model } : {}),
-          reasoningEffort: this.config.reasoningEffort,
+          reasoningEffort: depth.reasoningEffort,
           sandbox: this.config.sandbox,
+          depth: depth.depth,
+          depthSignals: depth.signals,
           pass,
           maxPasses: this.config.maxPasses,
           furtherPassesAllowed: pass < this.config.maxPasses,

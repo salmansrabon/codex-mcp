@@ -17,6 +17,8 @@ export interface StructuredReviewRequest<T> {
   signal?: AbortSignal;
   logger: Logger;
   runner: CodexRunner;
+  /** Depth-scaled effort for this review; omitted means the configured value. */
+  reasoningEffort?: string;
 }
 
 export interface StructuredReviewOutcome<T> {
@@ -42,6 +44,7 @@ export async function runStructuredReview<T>(request: StructuredReviewRequest<T>
     projectRoot: request.projectRoot,
     ...(request.broker ? { broker: request.broker } : {}),
     timeoutMs: request.timeoutMs,
+    ...(request.reasoningEffort ? { reasoningEffort: request.reasoningEffort } : {}),
     ...(request.signal ? { signal: request.signal } : {}),
   });
 
@@ -67,6 +70,7 @@ export async function runStructuredReview<T>(request: StructuredReviewRequest<T>
     projectRoot: request.projectRoot,
     ...(request.broker ? { broker: request.broker } : {}),
     timeoutMs: request.timeoutMs,
+    ...(request.reasoningEffort ? { reasoningEffort: request.reasoningEffort } : {}),
     ...(request.signal ? { signal: request.signal } : {}),
   });
 

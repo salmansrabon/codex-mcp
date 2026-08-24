@@ -19,6 +19,8 @@ export interface CodexRunRequest {
   signal?: AbortSignal;
   /** JSON Schema for the final response; passed to Codex when supplied. */
   outputSchema?: unknown;
+  /** Effort for this run only; defaults to the configured value. */
+  reasoningEffort?: string;
 }
 
 export interface CodexRunResult extends ParsedCodexOutput {
@@ -91,6 +93,7 @@ export class CodexRunner {
         lastMessageFile,
         ...(request.broker ? { broker: request.broker } : {}),
         ...(outputSchemaFile ? { outputSchemaFile } : {}),
+        ...(request.reasoningEffort ? { reasoningEffort: request.reasoningEffort } : {}),
       });
 
       this.logger.debug('invoking codex', {

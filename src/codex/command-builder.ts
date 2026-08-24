@@ -17,6 +17,14 @@ export interface BuildCodexArgsOptions {
   broker?: BrokerLaunchSpec;
   /** Optional JSON Schema file constraining the final response. */
   outputSchemaFile?: string;
+  /**
+   * Per-review effort, chosen from the change set by `review-depth`.
+   *
+   * The configured value stays the ceiling — depth assessment only ever lowers
+   * it — so an operator who pinned the reviewer to a high effort still gets it
+   * on every change that carries risk.
+   */
+  reasoningEffort?: string;
 }
 
 /**
@@ -31,6 +39,7 @@ export interface BuildCodexArgsOptions {
  */
 export function buildCodexArgs(options: BuildCodexArgsOptions): string[] {
   const { config, projectRoot, lastMessageFile, broker, outputSchemaFile } = options;
+  const reasoningEffort = options.reasoningEffort ?? config.reasoningEffort;
 
   const args: string[] = ['exec'];
 
@@ -45,7 +54,7 @@ export function buildCodexArgs(options: BuildCodexArgsOptions): string[] {
   if (config.model) args.push('-m', config.model);
   if (outputSchemaFile) args.push('--output-schema', outputSchemaFile);
 
-  args.push('-c', `model_reasoning_effort=${tomlString(config.reasoningEffort)}`);
+  args.push('-c', `model_reasoning_effort=${tomlString(reasoningEffort)}`);
 
   // Approvals must never block a headless review; `never` makes Codex fail the
   // action instead of hanging on a prompt nobody can answer.

@@ -19,6 +19,21 @@ rest. You own the final artifact; codex-mcp never writes it.
 The reviewer is strictly read-only: it cannot edit files, commit, push, modify issues, or write to
 any database or external system.
 
+Two optional inputs change the answer you get, so supply them when they apply:
+
+- \`knownCoverage\` — coverage that already exists outside this artifact (an automated suite, a
+  test-management pack). Without it the reviewer cannot tell "absent here" from "untested anywhere",
+  and will ask for tests the project already runs.
+- \`constraints.maxTestCases\` — a hard ceiling on the final artifact. With it, the reviewer answers
+  "what is the strongest set of N" and names what each addition should displace, instead of handing
+  back more cases than the artifact can hold.
+
+Findings come back with their verification recorded: \`verificationStatus\` (CONFIRMED / PROVISIONAL /
+HYPOTHESIS), the path the reviewer traced, the contradictions it searched for, separate evidence,
+impact, and scope confidences, and \`objectionPriority\` (MUST_FIX / SHOULD_FIX / OPTIONAL). A
+CONFIRMED label that is not backed by a recorded contradiction search is downgraded by codex-mcp
+before you see it. OPTIONAL findings do not block acceptance.
+
 Required: reviewType, project.root, and a matching candidate set. Everything else — task context,
 blast-radius, test-charter, connectors — is optional and never blocks a review.`;
 

@@ -122,6 +122,47 @@ export const QualifyRequestSchema = z
       })
       .default({}),
 
+    /**
+     * Coverage the caller already knows exists elsewhere.
+     *
+     * Without this the reviewer has only one way to read a gap in the submitted
+     * artifact: untested. That produces the most expensive kind of noise — a
+     * demand for a test the project already runs — and no amount of prompt
+     * exhortation fixes it, because the reviewer genuinely cannot see the
+     * difference between "absent here" and "absent everywhere".
+     */
+    knownCoverage: z
+      .array(
+        z.object({
+          area: z.string().min(1).describe('What is already covered, e.g. "request-schema boundary validation".'),
+          location: z.string().optional().describe('Where, e.g. "test/unit/validation.spec.js" or a test-management id.'),
+          source: z.string().optional().describe('automated-suite, test-management, manual-regression-pack, ...'),
+          note: z.string().optional(),
+        }),
+      )
+      .optional()
+      .describe('Coverage that exists outside this artifact. The reviewer must not re-request it as missing.'),
+
+    /**
+     * Hard limits the final artifact must respect.
+     *
+     * A ceiling turns review from an append-only exercise into a portfolio
+     * problem: an addition is only worth making if it displaces something
+     * weaker. Declaring it here is what lets the reviewer answer the actual
+     * question instead of handing back more cases than the artifact can hold.
+     */
+    constraints: z
+      .object({
+        maxTestCases: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe('Hard ceiling on the final test-case count. Additions beyond it must name what they displace.'),
+        note: z.string().optional().describe('Any other stated constraint on the artifact, e.g. "manual execution only".'),
+      })
+      .optional(),
+
     options: z
       .object({
         useJira: z.boolean().optional(),

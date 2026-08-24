@@ -6,6 +6,20 @@ import type { RequirementEvidence } from '../evidence/jira.js';
 import type { RepositoryEvidence } from '../evidence/repository.js';
 import { renderScopeNotice, type ScopeNotice } from '../evidence/scope.js';
 import { renderProjectMemory, type StoredFact } from '../memory/project-memory.js';
+import type { ReviewDepth } from '../review/review-depth.js';
+import {
+  CONFIDENCE_CALIBRATION,
+  FALSIFICATION,
+  KNOWN_COVERAGE_RULE,
+  OBJECTION_RANKING,
+  SELF_AUDIT,
+  VALUE_THRESHOLD,
+  renderConstraints,
+  renderDepthBudget,
+  renderKnownCoverage,
+  type ArtifactConstraints,
+  type KnownCoverageEntry,
+} from './verification.js';
 
 /** Verbatim base prompt from PLAN.md §21. */
 export const BASE_REVIEWER_PROMPT = `You are an independent adversarial software-quality reviewer.
@@ -325,6 +339,12 @@ export interface PromptContext {
   projectMemory?: readonly StoredFact[];
   /** Set when the review root is below the workspace the client opened. */
   scopeNotice?: ScopeNotice;
+  /** Coverage the caller declared exists outside the artifact under review. */
+  knownCoverage?: readonly KnownCoverageEntry[];
+  /** Hard limits on the final artifact, e.g. a test-case ceiling. */
+  constraints?: ArtifactConstraints;
+  /** Cost budget, computed by codex-mcp from the change set. */
+  depth?: { level: ReviewDepth; signals: readonly string[] };
   focus?: string;
   pass: number;
   maxPasses: number;
@@ -387,6 +407,17 @@ Dot-files and dot-directories are part of the project and are yours to read.${co
 
   const memory = renderProjectMemory(context.projectMemory ?? []);
   if (memory) sections.push(memory);
+
+  // Declared coverage and hard constraints are context, not methodology: they
+  // describe this artifact rather than how to review one, so they sit with the
+  // evidence and are absent entirely when the caller supplied neither.
+  const knownCoverage = renderKnownCoverage(context.knownCoverage ?? []);
+  if (knownCoverage) sections.push(knownCoverage);
+
+  const constraints = renderConstraints(context.constraints);
+  if (constraints) sections.push(constraints);
+
+  if (context.depth) sections.push(renderDepthBudget(context.depth.level, context.depth.signals));
 
   if (context.focus) {
     sections.push(`## Caller focus request
@@ -542,9 +573,21 @@ export function buildBasePrompt(context: PromptContext): string {
     CHANGE_TYPE_ANALYSIS,
     DEPENDENCY_ANALYSIS,
     ARTIFACT_SKEPTICISM,
+    // Falsification comes before the severity and materiality rules on purpose:
+    // both of those describe how to report a finding, and this one decides
+    // whether there is a finding to report.
+    FALSIFICATION,
+    CONFIDENCE_CALIBRATION,
     PROVISIONAL_SEVERITY,
+    OBJECTION_RANKING,
     MATERIALITY,
+    VALUE_THRESHOLD,
+    KNOWN_COVERAGE_RULE,
     RESULT_CONVENTIONS,
     renderContext(context),
+    // Last, because it is a pass over the answer rather than part of building
+    // it. A self-check placed mid-prompt gets applied to the method instead of
+    // to the output.
+    SELF_AUDIT,
   ].join('\n\n');
 }

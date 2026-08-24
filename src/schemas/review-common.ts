@@ -20,6 +20,57 @@ export const PrioritySchema = z.enum(['low', 'medium', 'high', 'critical']);
 export const SeverityStatusSchema = z.enum(['CONFIRMED', 'PROVISIONAL']);
 export type SeverityStatus = z.infer<typeof SeverityStatusSchema>;
 
+/**
+ * How well the *mechanism* of a finding is established, as opposed to how bad
+ * its impact would be.
+ *
+ * Separate from `severityStatus` on purpose. A reviewer can be certain a
+ * scenario is untested (`CONFIRMED` evidence) while being wrong about why it
+ * breaks, and the evaluation that motivated this field failed exactly there: an
+ * incomplete dependency trace was reported as a settled mechanism.
+ *
+ * The default is deliberately the *weaker* value. Silence must not buy
+ * confidence — a reviewer that never mentions a contradiction search has not
+ * done one, and the gate in `verification-gate.ts` treats it that way.
+ */
+export const VerificationStatusSchema = z.enum(['CONFIRMED', 'PROVISIONAL', 'HYPOTHESIS']);
+export type VerificationStatus = z.infer<typeof VerificationStatusSchema>;
+
+/**
+ * What the authoring agent must actually do about an objection.
+ *
+ * Ranking exists so a report cannot be padded into significance. `OPTIONAL`
+ * entries are observations; on their own they do not block acceptance, which is
+ * enforced in the status derivation rather than left to prose.
+ */
+export const ObjectionPrioritySchema = z.enum(['MUST_FIX', 'SHOULD_FIX', 'OPTIONAL']);
+export type ObjectionPriority = z.infer<typeof ObjectionPrioritySchema>;
+
+/**
+ * One recorded attempt to disprove the reviewer's own claim.
+ *
+ * This is the evidence that falsification happened. It is a first-class field
+ * rather than prose because it has to be machine-checkable: `CONFIRMED` is
+ * granted by the gate only when at least one of these came back
+ * `no-contradiction-found`, so an unfalsified claim cannot present itself as a
+ * verified one.
+ */
+export const ContradictionCheckSchema = z.object({
+  checked: z
+    .string()
+    .min(1)
+    .describe('The candidate refutation you looked for, e.g. "a guard on the parent resource that already blocks this".'),
+  where: z.string().optional().describe('Where you looked: file, directory, test file, connector, or service.'),
+  outcome: z
+    .enum(['no-contradiction-found', 'weakens', 'refutes', 'unresolved'])
+    .describe(
+      'no-contradiction-found: looked and the claim survived. weakens: partly undermines it. ' +
+        'refutes: the claim is wrong — withdraw it. unresolved: could not reach the evidence.',
+    ),
+  detail: z.string().optional(),
+});
+export type ContradictionCheck = z.infer<typeof ContradictionCheckSchema>;
+
 /** Fields any severity- or priority-bearing entry carries. */
 export const SeverityQualifierShape = {
   severityStatus: SeverityStatusSchema.default('CONFIRMED').describe(
@@ -32,6 +83,50 @@ export const SeverityQualifierShape = {
     .string()
     .optional()
     .describe('What you could not inspect that could change the impact. Required reading when severityStatus is PROVISIONAL.'),
+} as const;
+
+/**
+ * Fields that record *how the conclusion was reached*, carried by every entry a
+ * reader might act on.
+ *
+ * The three confidence dimensions are split because collapsing them is what
+ * produces a confident wrong answer. "This path is untested" and "this is why
+ * production breaks" are different claims with different evidence, and a single
+ * `confidence` value silently reports the weaker one at the strength of the
+ * stronger.
+ */
+export const VerificationShape = {
+  verificationStatus: VerificationStatusSchema.default('PROVISIONAL').describe(
+    'CONFIRMED only when you traced the relevant path AND searched for contradictions and found none. ' +
+      'PROVISIONAL when part of the path, another repository, or runtime behavior is unverified. ' +
+      'HYPOTHESIS when this is an investigative lead rather than a demonstrated gap or defect.',
+  ),
+  verifiedPath: z
+    .array(z.string())
+    .default([])
+    .describe(
+      'The hops you actually inspected, in order, e.g. ["routes/x.ts:12", "services/y.ts:40", "policy/z.ts:88"]. ' +
+        'One file is not a trace. Name only hops you opened.',
+    ),
+  contradictionsChecked: z
+    .array(ContradictionCheckSchema)
+    .default([])
+    .describe('What you looked at that could have made this finding false, and what you found. Required for CONFIRMED.'),
+  evidenceConfidence: ConfidenceSchema.optional().describe(
+    'Confidence that the observation itself is correct — the assertion is absent, the check is missing, the path exists.',
+  ),
+  scopeConfidence: ConfidenceSchema.optional().describe(
+    'Confidence that you saw enough of the system for this conclusion to hold, e.g. low when another repository participates.',
+  ),
+} as const;
+
+/** Objection ranking, carried by anything the authoring agent is asked to act on. */
+export const ObjectionShape = {
+  objectionPriority: ObjectionPrioritySchema.default('SHOULD_FIX').describe(
+    'MUST_FIX: the artifact is materially wrong, misleading, untestable, or missing a major risk. ' +
+      'SHOULD_FIX: meaningfully better with it, usable without it. ' +
+      'OPTIONAL: refinement with low incremental risk coverage — does not block acceptance.',
+  ),
 } as const;
 
 export const EvidenceSchema = z.object({

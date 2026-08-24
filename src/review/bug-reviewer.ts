@@ -7,6 +7,7 @@ import type { CandidateBug } from '../schemas/qualify-request.js';
 import type { Limitation } from '../schemas/review-common.js';
 import type { Logger } from '../util/logger.js';
 import { runStructuredReview } from './structured-review.js';
+import { gateBugReview } from './verification-gate.js';
 
 export interface BugReviewInput {
   context: PromptContext;
@@ -15,6 +16,8 @@ export interface BugReviewInput {
   logger: Logger;
   broker?: BrokerLaunchSpec;
   timeoutMs: number;
+  /** Depth-scaled effort, decided by the orchestrator from the change set. */
+  reasoningEffort?: string;
   signal?: AbortSignal;
 }
 
@@ -36,6 +39,7 @@ export async function reviewBugs(input: BugReviewInput): Promise<BugReviewOutput
     projectRoot: input.context.projectRoot,
     ...(input.broker ? { broker: input.broker } : {}),
     timeoutMs: input.timeoutMs,
+    ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
     ...(input.signal ? { signal: input.signal } : {}),
     logger: input.logger,
     runner: input.runner,
@@ -93,6 +97,11 @@ export function normalizeBugReview(
       recommendation: 'Treat this finding as unverified and verify it independently before publishing.',
       missingEvidence: [],
       severityStatus: 'CONFIRMED',
+      // Nothing was traced and nothing was falsified, because no verdict was
+      // returned at all. PROVISIONAL is the only honest label for a placeholder.
+      verificationStatus: 'PROVISIONAL',
+      verifiedPath: [],
+      contradictionsChecked: [],
     });
   }
 
@@ -115,16 +124,28 @@ export function normalizeBugReview(
     });
   }
 
+  // Confirmation discipline runs before the summary and the status: a verdict
+  // the gate lowers must be counted at its lowered strength.
+  const gated = gateBugReview({ findings, additionalFindings: result.additionalFindings });
+  limitations.push(...gated.limitations);
+
   const summary = {
-    verified: findings.filter((f) => f.verdict === 'VERIFIED').length,
-    falsePositive: findings.filter((f) => f.verdict === 'FALSE_POSITIVE').length,
-    needsMoreEvidence: findings.filter((f) => f.verdict === 'NEEDS_MORE_EVIDENCE').length,
-    other: findings.filter(
+    verified: gated.findings.filter((f) => f.verdict === 'VERIFIED').length,
+    falsePositive: gated.findings.filter((f) => f.verdict === 'FALSE_POSITIVE').length,
+    needsMoreEvidence: gated.findings.filter((f) => f.verdict === 'NEEDS_MORE_EVIDENCE').length,
+    other: gated.findings.filter(
       (f) => !['VERIFIED', 'FALSE_POSITIVE', 'NEEDS_MORE_EVIDENCE'].includes(f.verdict),
     ).length,
   };
 
-  return { ...result, status: deriveBugReviewStatus(result, findings, limitations), findings, summary, limitations };
+  return {
+    ...result,
+    status: deriveBugReviewStatus({ ...result, additionalFindings: gated.additionalFindings }, gated.findings, limitations),
+    findings: gated.findings,
+    additionalFindings: gated.additionalFindings,
+    summary,
+    limitations,
+  };
 }
 
 /**
@@ -152,11 +173,16 @@ export function deriveBugReviewStatus(
     return 'INCONCLUSIVE';
   }
 
+  // An `OPTIONAL` additional finding is an observation the reviewer itself said
+  // the artifact survives without; counting it as required action is what turns
+  // a padded list into a blocked review.
+  const blockingAdditions = result.additionalFindings.filter((finding) => finding.objectionPriority !== 'OPTIONAL');
+
   const needsAction =
     findings.some((finding) =>
       ['FALSE_POSITIVE', 'SEVERITY_DISAGREEMENT', 'DUPLICATE_OR_ALREADY_COVERED'].includes(finding.verdict),
     ) ||
-    result.additionalFindings.length > 0 ||
+    blockingAdditions.length > 0 ||
     result.disagreements.some((disagreement) => disagreement.material);
 
   return needsAction ? 'CHANGES_REQUIRED' : 'PASS';

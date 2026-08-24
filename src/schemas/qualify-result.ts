@@ -21,7 +21,11 @@ export const QualifyResultSchema = z.object({
 
   meta: z.object({
     model: z.string().optional(),
+    /** The effort actually used, which depth assessment may have lowered. */
     reasoningEffort: z.string(),
+    /** How much review the change was judged to be worth, and why. */
+    depth: z.enum(['SMALL', 'MEDIUM', 'HIGH']),
+    depthSignals: z.array(z.string()).default([]),
     sandbox: z.string(),
     pass: z.number().int().min(1),
     maxPasses: z.number().int().min(1),
