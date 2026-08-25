@@ -224,7 +224,7 @@ This writes to `~/.claude.json` and applies wherever you work.
 > `env` in it — is silently ignored. Run `claude mcp remove codex-mcp` if you are
 > switching to `.mcp.json`.
 
-Restart Claude Code. `/mcp` should now list `codex-mcp` with three tools. If it
+Restart Claude Code. `/mcp` should now list `codex-mcp` with four tools. If it
 does not, see [Troubleshooting](#troubleshooting).
 
 Other MCP clients take the same two fields — `command: codex-mcp`,
@@ -538,6 +538,8 @@ own README first. Splitting the connection into parts is worth it where the
 server supports it — the password stays one isolated `${VAR}` instead of being
 buried in a URL that is awkward to redact and easy to paste somewhere public.
 
+A GitHub connector belongs in this shape too — see [GitHub](#github) below.
+
 Write the secret as a `${VAR}` reference rather than a literal. It resolves from
 the `.env` beside the config or from the environment, an unset one is reported by
 `doctor` instead of failing at review time, and `${VAR:-fallback}` supplies a
@@ -654,6 +656,64 @@ Use a **read-only database account**. codex-mcp refuses every mutating
 statement, but a read-only grant is the boundary that does not depend on this
 server being correct.
 
+### GitHub
+
+Issues, pull requests, and repository contents, brokered like any other
+connector. Configure it as style A — `gh` already holds a credential, so there
+is nothing new to create:
+
+```yaml
+connectors:
+  github:
+    enabled: true
+    kind: custom
+    approval: once
+    transport: stdio
+    command: npx
+    args: ['-y', '@modelcontextprotocol/server-github']
+    env:
+      GITHUB_PERSONAL_ACCESS_TOKEN: ${GITHUB_TOKEN}
+```
+
+```bash
+GITHUB_TOKEN=$(gh auth token) codex-mcp doctor
+```
+
+**`command` is not `gh`.** This field launches an MCP server and the `gh` CLI
+does not speak MCP — it would fail the handshake. `gh` mints the token; the
+server does the talking.
+
+The classifier sorts the tools by name, with no GitHub-specific rules:
+
+```text
+[  ok  ] Connector: github
+           14 read-only tool(s) exposed, 12 withheld by policy.
+```
+
+Exposed: `get_issue`, `list_issues`, `search_issues`, `get_file_contents`,
+`search_code`, `list_commits`, and the pull-request reads. Withheld tools are
+refused at call time, not merely hidden — `github__create_issue` comes back
+`DOWNSTREAM_MCP_PERMISSION_DENIED`.
+
+`get_file_contents` and `search_code` read a repository **without a clone**,
+which is useful for a dependency you do not have checked out. It is not a
+substitute for `project.root`: a review still needs the working tree, the diff,
+and the existing tests. See
+[Reviewing a GitHub repository](#reviewing-a-github-repository).
+
+Set `kind: jira` instead of `custom` if you track requirements as GitHub issues
+and want `task.id` resolved through it — that is what makes the reviewer read
+the issue itself rather than trusting the description your agent passed in.
+
+> A caveat on `doctor`: the GitHub MCP server lists its tools without checking
+> the token, so a connector with `GITHUB_TOKEN` unset still reports `ok` with
+> the full count. Calls then fail with 401. The `Configuration warning` naming
+> the unset variable is the real signal.
+
+Prefer a read-scoped token, and see
+[Why not just let it run `gh`](#why-not-just-let-it-run-gh) for what goes wrong
+if you skip the broker and hand Codex the CLI directly.
+
 ---
 
 ## Project memory
@@ -766,38 +826,37 @@ loses the change set.
 ### GitHub as an evidence source
 
 The clone gives codex-mcp the code. To also let it read issues and PR
-discussion, add a GitHub MCP server as a connector — it is brokered read-only
-like any other, and its write tools are withheld by policy:
+discussion, add a GitHub connector — brokered read-only like any other, with its
+write tools withheld by policy. The configuration and the exposed/withheld tool
+list live with the other connectors under [GitHub](#github); one line is all it
+takes to point at it:
 
-```yaml
-connectors:
-  github:
-    enabled: true
-    kind: custom
-    approval: once
-    transport: stdio
-    command: npx
-    args: ['-y', 'your-github-mcp-server']
-    env:
-      GITHUB_PERSONAL_ACCESS_TOKEN: ''
+```bash
+GITHUB_TOKEN=$(gh auth token) codex-mcp doctor
 ```
 
-Use a **read-only token**. codex-mcp refuses every mutating tool it classifies,
-but a token that cannot write is the boundary that does not depend on this
-server being correct. Then run `codex-mcp doctor` and check the exposed/withheld
-counts:
+What it adds *here*, on top of the clone: `get_issue` and `search_issues` give
+the reviewer the issue behind the branch, and the pull-request reads give it the
+review discussion — the argument about the change, which the diff does not
+carry. Neither replaces the working tree.
 
-```text
-[  ok  ] Connector: github
-           9 read-only tool(s) exposed, 6 withheld by policy.
-```
+### Why not just let it run `gh`
+
+Codex can execute `gh` — it is on PATH, and the sandbox does not block the
+network. With a token in its environment it fetches live issues happily. Do not
+do this.
+
+`--sandbox read-only` restricts the **filesystem**, not the network. A token
+with `repo` scope in that environment means `gh issue create`, `gh pr comment`,
+`gh pr merge`, and `gh repo delete` are all available, none of them pass through
+the broker, and nothing in codex-mcp can refuse them. The `forbidden` list
+`codex_capabilities` returns — which promises the reviewer will never "create,
+edit, comment on, or transition issues" — stops being true.
+
+Brokering costs one connector entry and keeps the guarantee.
 
 A tool with an unusual name may land in `deniedTools` as `unknown`; add it to
 that connector's `allowTools` if it is genuinely read-only.
-
-Set `kind: jira` instead of `custom` if you track requirements as GitHub issues
-and want `task.id` resolved through it — that is what makes the reviewer read
-the issue itself rather than trusting the description your agent passed in.
 
 ### What it does not do
 
@@ -1044,6 +1103,52 @@ configured `auth.mode`. Never returns a credential.
 Diagnostic. What evidence this instance can reach, which downstream tools were
 withheld and why, and an explicit list of what the reviewer is forbidden to do.
 
+### `codex_ask`
+
+Ask Codex a general question, get prose back. The only tool here that does not
+return a review delta.
+
+**It reads no repository.** Codex is launched rooted at an empty scratch
+directory, so nothing about your code is in scope — that is the absence of an
+argument, not a rule the model is asked to follow. Ask it about your codebase
+and it will tell you it cannot see it. `codex_qualify` is the grounded path for
+that.
+
+**It can reach your evidence connectors**, on exactly the terms a review does:
+each one goes through the same consent gate its `approval` setting drives, and a
+connector that is denied — or that no interactive client was available to
+approve — is reported in `limitations` and the question is answered without it.
+
+```console
+$ codex-mcp ask "Summarise Jira ticket TASK-42 in four sentences."
+TASK-42 adds an in-app notification bell, unread badge, dropdown, and
+real-time SSE updates. It notifies staff of student submissions and students
+of assignment reviews, with extensible notification types. It also fixes
+grading authorization and submission-identity spoofing vulnerabilities.
+Implementation is complete but uncommitted and remains "To Do".
+
+[grounded in: jira, database]
+```
+
+The response reports what it actually had:
+
+```json
+{ "answer": "...", "connectorsUsed": ["jira", "database"], "limitations": [] }
+```
+
+Treat an answer with an empty `connectorsUsed` as unverified recall. Even a
+grounded one is weaker evidence than a review's citations, which are checked
+against their source; the usual precedence holds either way — requirement,
+runtime, code, and database beat model opinion.
+
+**Consent differs by surface.** From an MCP client you get the elicitation
+prompt, once per session per connector, shared with reviews. From the terminal,
+running `codex-mcp ask` is itself taken as consent — the human typed it — so
+there is no prompt. That is a deliberate weakening: anything able to invoke the
+CLI can reach your connectors without being asked.
+
+Times out at 120s rather than the review path's 900s.
+
 ---
 
 ## CLI
@@ -1053,6 +1158,7 @@ codex-mcp init         # write ~/.config/codex-mcp/, detecting local MCP servers
 codex-mcp start        # run the MCP server on stdio (what a client launches)
 codex-mcp login        # authenticate (--mode chatgpt|api)
 codex-mcp auth-status  # report auth state, never credentials
+codex-mcp ask "..."    # a general question; no repo, but consented connectors
 codex-mcp doctor       # diagnose everything; mutates nothing
 ```
 

@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { login } from '../src/auth/login.js';
 import { AuthManager } from '../src/auth/auth-manager.js';
+import { CodexRunner } from '../src/codex/codex-runner.js';
+import { AutoConsentGate } from '../src/policy/consent.js';
 import { loadConfig, usableConnectors, type Config } from '../src/config/config.js';
 import type { AuthMode } from '../src/config/schema.js';
 import { runDoctor, type CheckStatus } from '../src/doctor.js';
@@ -8,11 +10,14 @@ import { planInit, runInit } from '../src/init.js';
 import { CodexMcpError, toCodexMcpError } from '../src/errors/codex-mcp-error.js';
 import { BrokerServer } from '../src/mcp-broker/broker-server.js';
 import { CodexMcpServer } from '../src/server.js';
+import { handleCodexAsk } from '../src/tools/codex-ask.js';
 import { Logger, rootLogger } from '../src/util/logger.js';
 
 interface ParsedArgs {
   command: string;
   flags: Record<string, string | boolean>;
+  /** Non-flag arguments, in order. `ask` takes its question this way. */
+  positionals: string[];
 }
 
 const USAGE = `codex-mcp — an independent, read-only Codex quality gate for QA artifacts.
@@ -23,6 +28,7 @@ Usage:
   codex-mcp login [--mode chatgpt|api] [--api-key <key>] [--force]
   codex-mcp auth-status [--json]
   codex-mcp doctor [--project <path>] [--config <path>] [--json]
+  codex-mcp ask "<question>" [--config <path>] [--json]
   codex-mcp broker --connectors <a,b> [--cwd <dir>] [--config <path>]
 
 Commands:
@@ -40,6 +46,11 @@ Commands:
                 Without --mode, AUTH_MODE from your configuration is used.
   auth-status   Report whether Codex is authenticated. Never prints credentials.
   doctor        Diagnose installation, auth, model, config, and connectors. Read-only.
+  ask           Ask Codex a general question and print a prose answer. It reads no
+                repository, so it cannot answer anything about your code. It DOES
+                reach your configured evidence connectors read-only — running this
+                command is taken as your consent to that. Connectors used and any
+                withheld are reported on stderr.
   broker        Internal: the read-only evidence broker Codex connects to.
                 Launched by codex-mcp; not intended to be run by hand.
 `;
@@ -47,10 +58,14 @@ Commands:
 function parseArgs(argv: readonly string[]): ParsedArgs {
   const [command = 'start', ...rest] = argv;
   const flags: Record<string, string | boolean> = {};
+  const positionals: string[] = [];
 
   for (let index = 0; index < rest.length; index += 1) {
     const token = rest[index] as string;
-    if (!token.startsWith('--')) continue;
+    if (!token.startsWith('--')) {
+      positionals.push(token);
+      continue;
+    }
     const key = token.slice(2);
     const next = rest[index + 1];
     if (next !== undefined && !next.startsWith('--')) {
@@ -61,7 +76,7 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     }
   }
 
-  return { command, flags };
+  return { command, flags, positionals };
 }
 
 function configFrom(flags: Record<string, string | boolean>): Config {
@@ -218,6 +233,39 @@ async function commandAuthStatus(flags: Record<string, string | boolean>): Promi
   return status.authenticated ? 0 : 1;
 }
 
+async function commandAsk(
+  flags: Record<string, string | boolean>,
+  positionals: readonly string[],
+): Promise<number> {
+  const question = positionals.join(' ').trim();
+  if (question === '') {
+    process.stderr.write('Usage: codex-mcp ask "<question>"\n');
+    return 2;
+  }
+
+  const config = configFrom(flags);
+  const logger = new Logger(config.logLevel);
+  const authManager = new AuthManager({ codexBinary: config.codexBinary, expectedMode: config.authMode });
+  const runner = new CodexRunner({ config, logger });
+
+  // Typing this command IS the request to reach the configured connectors, so
+  // the CLI consents on the operator's behalf. A `trusted` connector needs no
+  // gate anywhere; everything else here relies on the terminal being the human.
+  const consent = new AutoConsentGate(true, 'Consent given by running `codex-mcp ask` in a terminal.');
+
+  const result = await handleCodexAsk(
+    { runner, config, logger, auth: authManager, consent },
+    { question },
+  );
+
+  if (flags['json'] === true) {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  } else {
+    process.stdout.write(`${result.answer}\n`);
+  }
+  return 0;
+}
+
 async function commandDoctor(flags: Record<string, string | boolean>): Promise<number> {
   const config = configFrom(flags);
   const logger = new Logger(config.logLevel);
@@ -243,7 +291,7 @@ async function commandDoctor(flags: Record<string, string | boolean>): Promise<n
 }
 
 async function main(): Promise<void> {
-  const { command, flags } = parseArgs(process.argv.slice(2));
+  const { command, flags, positionals } = parseArgs(process.argv.slice(2));
 
   if (flags['help'] === true || command === 'help' || command === '--help' || command === '-h') {
     process.stdout.write(USAGE);
@@ -270,6 +318,9 @@ async function main(): Promise<void> {
         break;
       case 'doctor':
         exitCode = await commandDoctor(flags);
+        break;
+      case 'ask':
+        exitCode = await commandAsk(flags, positionals);
         break;
       default:
         process.stderr.write(`Unknown command "${command}".\n\n${USAGE}`);

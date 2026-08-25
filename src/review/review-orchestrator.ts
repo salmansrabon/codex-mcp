@@ -99,6 +99,18 @@ export class ReviewOrchestrator {
     return this.permissions;
   }
 
+  /**
+   * The configured Codex runner, shared with `codex_ask`.
+   *
+   * Sharing it keeps one place where model, sandbox, and binary are resolved.
+   * It carries no evidence access of its own — what a run may reach is decided
+   * per call by the broker and output schema the caller passes, and `codex_ask`
+   * passes neither.
+   */
+  get codexRunner(): CodexRunner {
+    return this.runner;
+  }
+
   async qualify(rawRequest: unknown, signal?: AbortSignal): Promise<QualifyResult> {
     const request = this.parseRequest(rawRequest);
     const reviewId = newReviewId();

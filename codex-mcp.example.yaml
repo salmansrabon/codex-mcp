@@ -190,6 +190,34 @@ connectors:
     # Per-query timeout, in milliseconds.
     timeoutMs: 10000
 
+  github:
+    enabled: false
+    kind: custom
+    approval: once
+    transport: stdio
+    command: npx
+    args: ['-y', '@modelcontextprotocol/server-github']
+
+    # Note what this is NOT: `command: gh`. This field launches an MCP server,
+    # and the gh CLI does not speak MCP -- it would fail the handshake. gh is
+    # still the easiest way to get the credential, since it already holds one:
+    #
+    #   GITHUB_TOKEN=$(gh auth token) codex-mcp doctor
+    #
+    # Prefer a token scoped to read. Codex's read-only sandbox restricts the
+    # filesystem, not the network, so the token's own scope is the boundary
+    # that does not depend on this server being correct -- the same argument as
+    # the read-only database grant above.
+    env:
+      GITHUB_PERSONAL_ACCESS_TOKEN: ${GITHUB_TOKEN}
+
+    # Left to policy deliberately. The classifier reads tool names: get_*,
+    # list_*, and search_* are exposed; create_*, update_*, merge_*, delete_*
+    # are withheld, and a withheld tool is refused at call time, not merely
+    # hidden. Pinning an allowlist here would freeze that as the server changes.
+    allowTools: []
+    denyTools: []
+
   testrail:
     enabled: false
     kind: testmanagement

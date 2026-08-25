@@ -5,8 +5,14 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import { AuthManager } from './auth/auth-manager.js';
 import type { Config } from './config/config.js';
 import { CodexMcpError, toCodexMcpError } from './errors/codex-mcp-error.js';
-import { ElicitationConsentGate } from './policy/consent.js';
+import { ElicitationConsentGate, type ConsentGate } from './policy/consent.js';
 import { ReviewOrchestrator } from './review/review-orchestrator.js';
+import {
+  CODEX_ASK_DESCRIPTION,
+  CODEX_ASK_INPUT_SCHEMA,
+  CODEX_ASK_TOOL_NAME,
+  handleCodexAsk,
+} from './tools/codex-ask.js';
 import {
   CODEX_AUTH_STATUS_DESCRIPTION,
   CODEX_AUTH_STATUS_INPUT_SCHEMA,
@@ -39,7 +45,13 @@ evidence supports; reject the ones it does not and say why. Then write your fina
 codex-mcp does not and will not write it.
 
 Call it once per artifact under normal circumstances. A second pass is for cases where the first pass
-forced substantial high-risk changes, not for iterating toward agreement.`;
+forced substantial high-risk changes, not for iterating toward agreement.
+
+\`codex_ask\` is a separate surface that answers a general question in prose. It reads no repository,
+so it cannot answer anything about the user's code — \`codex_qualify\` is the grounded path for that.
+It can reach configured evidence connectors, each behind the same human consent gate a review uses;
+check \`connectorsUsed\` and \`limitations\` in the response to see what it actually had, and treat an
+answer with neither as unverified recall.`;
 
 export interface CodexMcpServerOptions {
   config: Config;
@@ -49,7 +61,7 @@ export interface CodexMcpServerOptions {
 /**
  * The MCP server surface (PLAN.md §17).
  *
- * Three tools, one of which does real work. Everything a caller can influence
+ * Four tools, two of which do real work. Everything a caller can influence
  * arrives as tool arguments; nothing a caller sends can change the permission
  * boundary.
  */
@@ -57,17 +69,23 @@ export class CodexMcpServer {
   private readonly server: Server;
   private readonly authManager: AuthManager;
   private readonly orchestrator: ReviewOrchestrator;
+  /**
+   * Shared by reviews and `codex_ask`, so an `approval: once` grant covers the
+   * session rather than prompting again per surface.
+   */
+  private readonly consent: ConsentGate;
 
   constructor(private readonly options: CodexMcpServerOptions) {
     this.authManager = new AuthManager({
       codexBinary: options.config.codexBinary,
       expectedMode: options.config.authMode,
     });
+    this.consent = new ElicitationConsentGate((message) => this.askUser(message), options.logger);
     this.orchestrator = new ReviewOrchestrator({
       config: options.config,
       logger: options.logger,
       authManager: this.authManager,
-      consent: new ElicitationConsentGate((message) => this.askUser(message), options.logger),
+      consent: this.consent,
     });
 
     this.server = new Server(
@@ -95,6 +113,11 @@ export class CodexMcpServer {
           name: CODEX_CAPABILITIES_TOOL_NAME,
           description: CODEX_CAPABILITIES_DESCRIPTION,
           inputSchema: CODEX_CAPABILITIES_INPUT_SCHEMA,
+        },
+        {
+          name: CODEX_ASK_TOOL_NAME,
+          description: CODEX_ASK_DESCRIPTION,
+          inputSchema: CODEX_ASK_INPUT_SCHEMA,
         },
       ],
     }));
@@ -136,6 +159,19 @@ export class CodexMcpServer {
           this.authManager,
           this.options.logger,
           (args ?? {}) as { probeConnectors?: boolean },
+        );
+      case CODEX_ASK_TOOL_NAME:
+        // Same consent gate as a review: reaching a connector from here still
+        // asks the human, on the terms that connector's `approval` sets.
+        return handleCodexAsk(
+          {
+            runner: this.orchestrator.codexRunner,
+            config: this.options.config,
+            logger: this.options.logger,
+            auth: this.authManager,
+            consent: this.consent,
+          },
+          args,
         );
       default:
         throw new CodexMcpError('INVALID_REVIEW_REQUEST', `Unknown tool "${name}".`);
