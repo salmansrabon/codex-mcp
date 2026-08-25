@@ -64,7 +64,8 @@ requirement / runtime / code / DB / external evidence  >  model opinion
 
 ## Install
 
-Requires **Node 20+**. Four commands, once per machine.
+Requires **Node 20+** on Linux, macOS, or Windows. Four commands, once per
+machine — identical on all three.
 
 ```bash
 # 1. The Codex CLI. codex-mcp drives it, and it owns your credentials.
@@ -92,6 +93,27 @@ project — see [Troubleshooting](#troubleshooting) for what each failure means.
 
 > The npm name `codex-mcp` belongs to an unrelated package. Install from source
 > as above, or publish under your own scope.
+
+### Windows
+
+Nothing extra to configure — the commands above are the whole setup. Worth
+knowing why, because the failure it avoids is a confusing one.
+
+npm does not install a `codex.exe`. It installs `codex.cmd` (plus a `.ps1` and
+an extensionless shell script), and Windows resolves the `.cmd` through
+`PATHEXT` — something `cmd.exe` does but `CreateProcess`, which Node's `spawn`
+uses, does not. A bare `codex` therefore fails with `spawn codex ENOENT` even
+though `codex --version` works in your terminal, and since CVE-2024-27980 Node
+will not run a `.cmd` without a shell either. `doctor` used to read this as a
+missing CLI and tell you to reinstall, which never helped.
+
+codex-mcp now resolves the launcher itself and passes arguments through
+`cmd.exe` with quoting that survives the shim's double parse, so a project path
+containing `&` or a connector env value containing `|` reaches Codex intact.
+POSIX is untouched: the resolver returns immediately off Windows.
+
+`CODEX_BINARY` also accepts a script rather than an installed CLI — its shebang
+is honoured on Windows, where the OS would otherwise refuse the file.
 
 ### What `init` does
 
@@ -972,6 +994,7 @@ not run it by hand.
 | `CODEX_AUTH_REQUIRED` | Not signed in | `codex-mcp login` |
 | `CODEX_MODEL_NOT_AVAILABLE` | Codex CLI too old, or the model is not on your account | `npm i -g @openai/codex@latest`, or pick another model |
 | `CODEX_NOT_INSTALLED` | Codex CLI missing from `PATH` | `npm i -g @openai/codex@latest` |
+| `Could not execute codex: spawn codex ENOENT` on Windows, with `codex` working in your shell | You are on a build from before Windows launcher resolution | Update and rebuild; see [Windows](#windows) |
 | Auth-mode mismatch error | `auth.mode` disagrees with how the CLI is signed in | Change one to match; do not silently bill the wrong account |
 | Connector missing from `doctor` | `enabled: false`, or no `command`/`url` | Check the YAML; `doctor` names the reason |
 | Connector skipped mid-review | Your client cannot show elicitation prompts | Set `approval: trusted` on it |
@@ -1034,6 +1057,12 @@ npm run typecheck
 400+ tests against a fake Codex CLI and a deliberately hostile fake MCP server.
 No network, no model calls, deterministic. This is what you run on every change
 and in CI.
+
+Green on Linux and macOS. On Windows the spawn and launcher layers pass, but
+ten tests still fail on path handling — `~` expansion, `HOME`-derived config
+discovery, and project-root containment all assume POSIX separators. Those are
+assertions about paths, not about behaviour under review; the server itself
+runs correctly on Windows.
 
 `tests/security/` is the part worth reading: it asserts that file edits,
 commits, pushes, issue writes, and DB mutations are refused — and that a refused

@@ -1,5 +1,7 @@
 import { spawn, type SpawnOptions } from 'node:child_process';
 
+import { resolveInvocation } from './windows-launcher.js';
+
 export interface RunProcessOptions {
   command: string;
   args?: readonly string[];
@@ -69,7 +71,15 @@ export function runProcess(options: RunProcessOptions): Promise<ProcessResult> {
       detached: !inheritStdio && process.platform !== 'win32',
     };
 
-    const child = spawn(command, [...args], spawnOptions);
+    // On Windows the CLI is a `.cmd` shim that CreateProcess cannot start by
+    // bare name; `resolveInvocation` finds it and, when needed, routes it
+    // through cmd.exe with a pre-escaped command line. A no-op on POSIX.
+    const invocation = resolveInvocation(command, args, spawnOptions.env ?? process.env);
+    if (invocation.windowsVerbatimArguments) {
+      spawnOptions.windowsVerbatimArguments = true;
+    }
+
+    const child = spawn(invocation.command, invocation.args, spawnOptions);
 
     let stdout = '';
     let stderr = '';
