@@ -84,6 +84,10 @@ function request() {
     reviewType: 'test-design' as const,
     project: { root: fixture.root },
     candidate: { testCases: CANDIDATE_TEST_CASES },
+    // The pool counts Codex processes, so this measures one review = one
+    // process. The unanchored discovery run is a second process per review and
+    // is exercised on its own elsewhere.
+    options: { independentDiscovery: false },
   };
 }
 

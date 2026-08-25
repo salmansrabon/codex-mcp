@@ -65,6 +65,16 @@ function reviewerReturns(body: unknown): void {
   writeFileSync(responsePath, JSON.stringify(body));
 }
 
+/**
+ * The prompt for one review path.
+ *
+ * A review spawns the audit and the unanchored risk-discovery run
+ * concurrently, so position in the log says nothing about which is which.
+ */
+function promptContaining(marker: string): string {
+  return prompts().find((prompt) => prompt.includes(marker)) ?? '';
+}
+
 function prompts(): string[] {
   if (!existsSync(logPath)) return [];
   return readFileSync(logPath, 'utf8')
@@ -384,7 +394,7 @@ describe('Scenario E — a test with no oracle', () => {
       },
     });
 
-    const prompt = prompts()[0] ?? '';
+    const prompt = promptContaining('independent test-design qualification');
     expect(prompt).toMatch(/no oracle — no expected result at all/);
     expect(prompt).toMatch(/observation-only steps/);
     expect(prompt).toMatch(/deferred assertion/);
@@ -453,7 +463,7 @@ describe('Scenario F — behavior that depends on a repository outside the revie
         },
         {
           candidateId: 'BUG-2',
-          verdict: 'FALSE_POSITIVE',
+          verdict: 'REFUTED',
           confidence: 'high',
           severityAssessment: null,
           reason: 'requireTenantAccess rejects a foreign tenant before the controller runs',
@@ -462,6 +472,8 @@ describe('Scenario F — behavior that depends on a repository outside the revie
             { source: 'code', location: 'src/routes/resources.ts:6' },
             { source: 'code', location: 'src/middleware/access.ts:6' },
           ],
+          // The guard itself: what was found, not what was searched.
+          refutedBy: [{ source: 'code', location: 'src/middleware/access.ts:6' }],
           missingEvidence: [],
           verificationStatus: 'CONFIRMED',
           verifiedPath: ['src/routes/resources.ts:6', 'src/middleware/access.ts:6', 'src/resource/controller.ts:4'],
@@ -489,7 +501,7 @@ describe('Scenario F — behavior that depends on a repository outside the revie
     expect(crossRepo?.scopeCaveat).toMatch(/outside this review root/);
 
     // The withdrawal, by contrast, did the work and keeps its strength.
-    expect(refuted?.verdict).toBe('FALSE_POSITIVE');
+    expect(refuted?.verdict).toBe('REFUTED');
     expect(refuted?.verificationStatus).toBe('CONFIRMED');
     expect(refuted?.confidence).toBe('high');
   });

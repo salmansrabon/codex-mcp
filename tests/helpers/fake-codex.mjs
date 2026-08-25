@@ -106,9 +106,41 @@ if (mode === 'hang') {
     ? (process.env.FAKE_CODEX_REPAIR_RESPONSE ?? process.env.FAKE_CODEX_RESPONSE)
     : process.env.FAKE_CODEX_RESPONSE;
 
+  // The independent-discovery run has its own prompt and its own result schema.
+  // A test that only cares about the audit path should not have to hand-feed a
+  // discovery response, so a clean one is served unless the test overrides it.
+  const isDiscovery = prompt.includes('independent risk discovery');
+  const discoveryResponsePath = process.env.FAKE_CODEX_DISCOVERY_RESPONSE;
+
   let body;
   if (mode === 'malformed' || (mode === 'malformed-once' && !isRepair)) {
     body = 'I looked at the repository and everything seems fine to me.';
+  } else if (isDiscovery && discoveryResponsePath) {
+    body = readFileSync(discoveryResponsePath, 'utf8');
+  } else if (isDiscovery) {
+    body = JSON.stringify({
+      status: 'PASS',
+      findings: [],
+      blockerSweep: [
+        'security-authn-authz',
+        'data-corruption-or-loss',
+        'critical-business-rule',
+        'migration-or-deployment',
+        'backward-compatibility',
+        'availability-or-performance-collapse',
+      ].map((blockerClass) => ({
+        blockerClass,
+        applicable: false,
+        outcome: 'no-blocker-found',
+        detail: 'fake-codex default sweep',
+        inspected: [],
+        findings: [],
+      })),
+      coverageMap: [],
+      rulesApplied: [],
+      limitations: [],
+      projectMemory: [],
+    });
   } else if (responsePath) {
     body = readFileSync(responsePath, 'utf8');
   } else {

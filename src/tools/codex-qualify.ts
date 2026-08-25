@@ -34,6 +34,27 @@ impact, and scope confidences, and \`objectionPriority\` (MUST_FIX / SHOULD_FIX 
 CONFIRMED label that is not backed by a recorded contradiction search is downgraded by codex-mcp
 before you see it. OPTIONAL findings do not block acceptance.
 
+**A bug verdict never overturns you on an absence.** Verdicts are CONFIRMED, REFUTED, UNPROVEN,
+CONFLICTING_EVIDENCE, INSUFFICIENT_SCOPE, SEVERITY_DISAGREEMENT, or DUPLICATE_OR_ALREADY_COVERED.
+Only REFUTED says your finding is wrong, and it requires the reviewer to cite what it *found* that
+makes the claim impossible — a refutation built on "I looked and found nothing" is downgraded to
+UNPROVEN before you see it, and the downgrade is reported. Treat UNPROVEN, CONFLICTING_EVIDENCE, and
+INSUFFICIENT_SCOPE as "still yours to resolve", not as clearance.
+
+Two more things come back that you did not ask for:
+
+- \`riskDiscovery\` — a second, independent Codex run that was never shown your candidate set,
+  answering "what did the author miss". It carries an explicit release-blocker sweep across security,
+  data integrity, business rules, migration, backward compatibility, and availability, plus the blast
+  radius as an inspected-or-not coverage map. \`riskOverlap\` marks which of its findings are NEW.
+  Turn it off with \`options.independentDiscovery: false\` if you only want the audit.
+- \`bugs.citationChecks\` — every \`file:line\` you cited, resolved against the filesystem before
+  the review ran. A citation that points at nothing is reported plainly; it does not make your
+  finding false, but it does mean the reference needs fixing.
+
+\`meta.evidence.scope.complete: false\` means the review is scope-limited: a repository this change
+depends on could not be read, every confidence is capped, and the unreadable roots are named.
+
 Required: reviewType, project.root, and a matching candidate set. Everything else — task context,
 blast-radius, test-charter, connectors — is optional and never blocks a review.`;
 

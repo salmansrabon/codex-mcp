@@ -150,18 +150,33 @@ const finding = (id: string, verdict: BugReviewResult['findings'][number]['verdi
   missingEvidence: [],
 });
 
+/**
+ * A refutation that survives the gate: it names what it found, and cites it.
+ * The bare `finding(id, 'REFUTED')` deliberately does not — an unsupported
+ * refutation is downgraded, which is the behaviour under test elsewhere.
+ */
+const supportedRefutation = (id: string) => ({
+  ...finding(id, 'REFUTED' as const),
+  refutedBy: [{ source: 'code', location: 'src/middleware/guard.ts:11' }],
+  verificationStatus: 'CONFIRMED' as const,
+  verifiedPath: ['src/routes/a.ts:3', 'src/middleware/guard.ts:11'],
+  contradictionsChecked: [
+    { checked: 'a path that reaches the handler without the guard', outcome: 'no-contradiction-found' as const },
+  ],
+});
+
 describe('normalizeBugReview', () => {
-  it('marks a candidate with no verdict INCONCLUSIVE rather than leaving it out', () => {
-    const result = normalizeBugReview(bugReview({ findings: [finding('BUG-1', 'VERIFIED')] }), bugs, cleanContext);
+  it('marks a candidate with no verdict INSUFFICIENT_SCOPE rather than leaving it out', () => {
+    const result = normalizeBugReview(bugReview({ findings: [finding('BUG-1', 'CONFIRMED')] }), bugs, cleanContext);
     expect(result.findings).toHaveLength(2);
     const missing = result.findings.find((f) => f.candidateId === 'BUG-2');
-    expect(missing?.verdict).toBe('INCONCLUSIVE');
+    expect(missing?.verdict).toBe('INSUFFICIENT_SCOPE');
     expect(missing?.recommendation).toMatch(/unverified/i);
   });
 
   it('drops verdicts for ids that were never submitted', () => {
     const result = normalizeBugReview(
-      bugReview({ findings: [finding('BUG-1', 'VERIFIED'), finding('BUG-9', 'FALSE_POSITIVE')] }),
+      bugReview({ findings: [finding('BUG-1', 'CONFIRMED'), finding('BUG-9', 'REFUTED')] }),
       bugs,
       cleanContext,
     );
@@ -171,23 +186,30 @@ describe('normalizeBugReview', () => {
 
   it('counts verdicts into the summary', () => {
     const result = normalizeBugReview(
-      bugReview({ findings: [finding('BUG-1', 'VERIFIED'), finding('BUG-2', 'FALSE_POSITIVE')] }),
+      bugReview({ findings: [finding('BUG-1', 'CONFIRMED'), supportedRefutation('BUG-2')] }),
       bugs,
       cleanContext,
     );
-    expect(result.summary).toEqual({ verified: 1, falsePositive: 1, needsMoreEvidence: 0, other: 0 });
+    expect(result.summary).toEqual({
+      confirmed: 1,
+      refuted: 1,
+      unproven: 0,
+      conflictingEvidence: 0,
+      insufficientScope: 0,
+      other: 0,
+    });
   });
 
   it('passes only when every candidate is verified', () => {
     const allVerified = normalizeBugReview(
-      bugReview({ findings: [finding('BUG-1', 'VERIFIED'), finding('BUG-2', 'VERIFIED')] }),
+      bugReview({ findings: [finding('BUG-1', 'CONFIRMED'), finding('BUG-2', 'CONFIRMED')] }),
       bugs,
       cleanContext,
     );
     expect(allVerified.status).toBe('PASS');
 
     const oneRejected = normalizeBugReview(
-      bugReview({ status: 'PASS', findings: [finding('BUG-1', 'VERIFIED'), finding('BUG-2', 'FALSE_POSITIVE')] }),
+      bugReview({ status: 'PASS', findings: [finding('BUG-1', 'CONFIRMED'), supportedRefutation('BUG-2')] }),
       bugs,
       cleanContext,
     );
@@ -202,7 +224,7 @@ describe('normalizeBugReview', () => {
   it('requires action when the reviewer found a defect the candidate set missed', () => {
     const result = normalizeBugReview(
       bugReview({
-        findings: [finding('BUG-1', 'VERIFIED'), finding('BUG-2', 'VERIFIED')],
+        findings: [finding('BUG-1', 'CONFIRMED'), finding('BUG-2', 'CONFIRMED')],
         additionalFindings: [{ title: 'unchecked tenant id', reason: 'r', evidence: [] }],
       }),
       bugs,

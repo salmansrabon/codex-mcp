@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import { BugReviewResultSchema } from './bug-review-result.js';
 import { ReviewStatusSchema } from './review-common.js';
+import { RiskDiscoveryResultSchema, RiskOverlapSchema } from './risk-discovery-result.js';
 import { TestReviewResultSchema } from './test-review-result.js';
 import { ReviewTypeSchema } from './qualify-request.js';
 
@@ -18,6 +19,24 @@ export const QualifyResultSchema = z.object({
 
   testDesign: TestReviewResultSchema.optional(),
   bugs: BugReviewResultSchema.optional(),
+
+  /**
+   * What an independent pass found without seeing the candidate set.
+   *
+   * Separate from `bugs.additionalFindings`, which comes from the anchored run
+   * and is structurally an afterthought. This is the answer to "what did the
+   * author miss", produced by a reviewer that was never shown what the author
+   * had.
+   */
+  riskDiscovery: RiskDiscoveryResultSchema.optional(),
+
+  /**
+   * How the two paths line up, computed after both finished.
+   *
+   * `NEW` entries are the point of the exercise: risks the independent pass
+   * found that nothing in the candidate set covers.
+   */
+  riskOverlap: z.array(RiskOverlapSchema).optional(),
 
   meta: z.object({
     model: z.string().optional(),
@@ -47,6 +66,36 @@ export const QualifyResultSchema = z.object({
       testCharter: z.boolean(),
       requirement: z.boolean(),
       connectors: z.array(z.string()),
+      /**
+       * What the review could actually see.
+       *
+       * `scopeComplete: false` is the machine-readable form of "this review is
+       * scope-limited": every confidence in the result is capped, and the
+       * unreadable repositories are named so a reader can decide whether the
+       * gap matters for their change.
+       */
+      scope: z
+        .object({
+          complete: z.boolean(),
+          additionalRoots: z.array(z.string()).default([]),
+          unreachableRoots: z.array(z.string()).default([]),
+          gaps: z.array(z.string()).default([]),
+        })
+        .optional(),
+      /** Rule documents found, and the ones retrieved as relevant to this change. */
+      projectRules: z
+        .object({
+          discovered: z.number().int().min(0),
+          applied: z.array(z.string()).default([]),
+        })
+        .optional(),
+      /** Author citations checked against the filesystem before the review ran. */
+      citations: z
+        .object({
+          checked: z.number().int().min(0),
+          broken: z.number().int().min(0),
+        })
+        .optional(),
     }),
   }),
 

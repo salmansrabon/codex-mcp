@@ -6,8 +6,12 @@ import type { CandidateBug, CandidateTestCase } from '../schemas/qualify-request
 import type { ReviewStatus } from '../schemas/review-common.js';
 import type { TestReviewResult } from '../schemas/test-review-result.js';
 import type { Logger } from '../util/logger.js';
+import type { RiskDiscoveryResult } from '../schemas/risk-discovery-result.js';
 import { reviewBugs } from './bug-reviewer.js';
+import { reviewRiskDiscovery } from './risk-discovery-reviewer.js';
 import { reviewTestDesign } from './test-design-reviewer.js';
+import type { EvidenceCoverage } from './verification-gate.js';
+import type { CitationCheck } from '../schemas/review-common.js';
 
 export interface CombinedReviewInput {
   context: PromptContext;
@@ -17,14 +21,21 @@ export interface CombinedReviewInput {
   logger: Logger;
   broker?: BrokerLaunchSpec;
   timeoutMs: number;
-  /** Depth-scaled effort; both runs of a combined review share it. */
+  /** Depth-scaled effort; every run of a combined review shares it. */
   reasoningEffort?: string;
   signal?: AbortSignal;
+  /** What the review could actually see. Caps confidence on every path. */
+  coverage?: EvidenceCoverage;
+  /** Author citations already resolved on disk, handed to the audit path. */
+  citationChecks?: readonly CitationCheck[];
+  /** Run the unanchored discovery pass. Off makes the review audit-only. */
+  independentDiscovery: boolean;
 }
 
 export interface CombinedReviewOutput {
   testDesign?: TestReviewResult;
   bugs?: BugReviewResult;
+  riskDiscovery?: RiskDiscoveryResult;
   repairAttempts: number;
   attemptedCommands: string[];
   /** Summed across both runs, when the CLI reports token usage. */
@@ -34,8 +45,9 @@ export interface CombinedReviewOutput {
 /**
  * `combined` review type.
  *
- * The two reviews run as separate Codex invocations rather than one merged
- * prompt. Test design asks "what should be covered"; bug verification asks "is
+ * Up to three reviews run as separate Codex invocations rather than one merged
+ * prompt: the test-design audit, the bug audit, and the unanchored risk
+ * discovery. Test design asks "what should be covered"; bug verification asks "is
  * this claim true". Fusing them measurably degrades both, and separate runs also
  * mean a schema failure in one does not discard the other.
  *
@@ -70,13 +82,24 @@ export async function reviewCombined(input: CombinedReviewInput): Promise<Combin
     ...(input.signal ? { signal: input.signal } : {}),
   };
 
-  const [testOutcome, bugOutcome] = await Promise.allSettled([
+  const [testOutcome, bugOutcome, discoveryOutcome] = await Promise.allSettled([
     input.testCases.length > 0 ? reviewTestDesign({ ...shared, candidates: input.testCases }) : Promise.resolve(undefined),
-    input.bugs.length > 0 ? reviewBugs({ ...shared, candidates: input.bugs }) : Promise.resolve(undefined),
+    input.bugs.length > 0
+      ? reviewBugs({
+          ...shared,
+          candidates: input.bugs,
+          ...(input.coverage ? { coverage: input.coverage } : {}),
+          ...(input.citationChecks ? { citationChecks: input.citationChecks } : {}),
+        })
+      : Promise.resolve(undefined),
+    // The third path runs from the same evidence and never sees the candidates.
+    input.independentDiscovery
+      ? reviewRiskDiscovery({ ...shared, ...(input.coverage ? { coverage: input.coverage } : {}) })
+      : Promise.resolve(undefined),
   ]);
 
-  // Report the first failure, but only once both processes have settled.
-  for (const settled of [testOutcome, bugOutcome]) {
+  // Report the first failure, but only once every process has settled.
+  for (const settled of [testOutcome, bugOutcome, discoveryOutcome]) {
     if (settled.status === 'rejected') throw settled.reason;
   }
 
@@ -104,9 +127,23 @@ export async function reviewCombined(input: CombinedReviewInput): Promise<Combin
     }
   }
 
+  let riskDiscovery: RiskDiscoveryResult | undefined;
+  if (discoveryOutcome.status === 'fulfilled' && discoveryOutcome.value) {
+    const outcome = discoveryOutcome.value;
+    riskDiscovery = outcome.result;
+    repairAttempts += outcome.repairAttempts;
+    attemptedCommands.push(...outcome.attemptedCommands);
+    if (outcome.usage) {
+      sawUsage = true;
+      inputTokens += outcome.usage.inputTokens ?? 0;
+      outputTokens += outcome.usage.outputTokens ?? 0;
+    }
+  }
+
   return {
     ...(testDesign ? { testDesign } : {}),
     ...(bugs ? { bugs } : {}),
+    ...(riskDiscovery ? { riskDiscovery } : {}),
     repairAttempts,
     attemptedCommands,
     ...(sawUsage ? { usage: { inputTokens, outputTokens } } : {}),

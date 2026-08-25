@@ -102,11 +102,11 @@ describe('stripNulls', () => {
   it('restores the defaults that make silence buy nothing', () => {
     const raw = {
       status: 'CHANGES_REQUIRED',
-      summary: { verified: 1, falsePositive: 0, needsMoreEvidence: 0, other: 0 },
+      summary: { confirmed: 1, refuted: 0, unproven: 0, conflictingEvidence: 0, insufficientScope: 0, other: 0 },
       findings: [
         {
           candidateId: 'BUG-1',
-          verdict: 'VERIFIED',
+          verdict: 'CONFIRMED',
           confidence: 'medium',
           reason: 'because',
           recommendation: 'fix it',

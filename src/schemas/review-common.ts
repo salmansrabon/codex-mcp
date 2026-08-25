@@ -5,6 +5,7 @@ export const ReviewStatusSchema = z.enum(['PASS', 'CHANGES_REQUIRED', 'INCONCLUS
 export type ReviewStatus = z.infer<typeof ReviewStatusSchema>;
 
 export const ConfidenceSchema = z.enum(['low', 'medium', 'high']);
+export type Confidence = z.infer<typeof ConfidenceSchema>;
 export const PrioritySchema = z.enum(['low', 'medium', 'high', 'critical']);
 
 /**
@@ -37,6 +38,45 @@ export const VerificationStatusSchema = z.enum(['CONFIRMED', 'PROVISIONAL', 'HYP
 export type VerificationStatus = z.infer<typeof VerificationStatusSchema>;
 
 /**
+ * What the review established about a claim someone else made.
+ *
+ * The five values exist because the previous three collapsed two very different
+ * outcomes into one. "I looked and found the guard that makes this impossible"
+ * and "I looked and found nothing either way" were both reported as
+ * FALSE_POSITIVE, so a reviewer with incomplete access could overturn a correct
+ * finding by failing to find its evidence. Absence of proof was being spent as
+ * proof of absence.
+ *
+ * - `CONFIRMED` — the mechanism was traced and survived a contradiction search.
+ * - `REFUTED` — **positive contradictory evidence** establishes the claim false.
+ *   Not "unsupported"; something was found that makes the claim impossible.
+ * - `UNPROVEN` — looked, found neither support nor contradiction. The claim
+ *   stands unverified; the author keeps it.
+ * - `CONFLICTING_EVIDENCE` — support and contradiction were both found. A human
+ *   has to adjudicate; the reviewer must not pick a side by itself.
+ * - `INSUFFICIENT_SCOPE` — the evidence that would settle it lives somewhere the
+ *   reviewer could not reach.
+ *
+ * Only `REFUTED` overturns the author. It is the only value the gate demands
+ * positive evidence for, and the only one it will silently take away.
+ */
+export const ClaimStatusSchema = z.enum([
+  'CONFIRMED',
+  'REFUTED',
+  'UNPROVEN',
+  'CONFLICTING_EVIDENCE',
+  'INSUFFICIENT_SCOPE',
+]);
+export type ClaimStatus = z.infer<typeof ClaimStatusSchema>;
+
+/** The claim statuses that leave the author's finding standing. */
+export const NON_OVERTURNING_CLAIM_STATUSES: readonly ClaimStatus[] = [
+  'UNPROVEN',
+  'CONFLICTING_EVIDENCE',
+  'INSUFFICIENT_SCOPE',
+];
+
+/**
  * What the authoring agent must actually do about an objection.
  *
  * Ranking exists so a report cannot be padded into significance. `OPTIONAL`
@@ -45,6 +85,13 @@ export type VerificationStatus = z.infer<typeof VerificationStatusSchema>;
  */
 export const ObjectionPrioritySchema = z.enum(['MUST_FIX', 'SHOULD_FIX', 'OPTIONAL']);
 export type ObjectionPriority = z.infer<typeof ObjectionPrioritySchema>;
+
+export const EvidenceSchema = z.object({
+  source: z.string().min(1),
+  location: z.string().min(1),
+  note: z.string().optional(),
+});
+export type Evidence = z.infer<typeof EvidenceSchema>;
 
 /**
  * One recorded attempt to disprove the reviewer's own claim.
@@ -65,9 +112,21 @@ export const ContradictionCheckSchema = z.object({
     .enum(['no-contradiction-found', 'weakens', 'refutes', 'unresolved'])
     .describe(
       'no-contradiction-found: looked and the claim survived. weakens: partly undermines it. ' +
-        'refutes: the claim is wrong — withdraw it. unresolved: could not reach the evidence.',
+        'refutes: something you FOUND makes the claim impossible — not merely absent support. ' +
+        'unresolved: could not reach the evidence.',
     ),
   detail: z.string().optional(),
+  /**
+   * What was found that contradicts the claim.
+   *
+   * Load-bearing for `refutes`, and the gate enforces it: a refutation with no
+   * cited contradictory evidence is a failed search wearing a verdict's
+   * clothes. "I could not find support" is `unresolved`, never `refutes`.
+   */
+  contradictoryEvidence: z
+    .array(EvidenceSchema)
+    .default([])
+    .describe('Required for outcome "refutes": the code, test, config, or record that makes the claim false.'),
 });
 export type ContradictionCheck = z.infer<typeof ContradictionCheckSchema>;
 
@@ -120,6 +179,29 @@ export const VerificationShape = {
   ),
 } as const;
 
+/**
+ * What a verdict must produce before it is allowed to overturn somebody.
+ *
+ * A separate field rather than a convention about `evidence[]`, because the
+ * distinction it encodes is the one the whole review turns on. `evidence`
+ * answers "what did you look at"; a failed search has evidence too — the files
+ * you opened and did not find the bug in. `refutedBy` answers "what did you
+ * FIND that makes this impossible", and there is no honest way to fill it in
+ * from a search that came back empty.
+ *
+ * The gate reads it and nothing else for the refutation decision, so the
+ * question cannot be answered by writing more prose.
+ */
+export const RefutationShape = {
+  refutedBy: z
+    .array(EvidenceSchema)
+    .default([])
+    .describe(
+      'Required for a REFUTED verdict: the guard, test, constraint, config, or record you FOUND that makes the claim impossible. ' +
+        'Not the files you searched. If you cannot fill this in, the verdict is UNPROVEN.',
+    ),
+} as const;
+
 /** Objection ranking, carried by anything the authoring agent is asked to act on. */
 export const ObjectionShape = {
   objectionPriority: ObjectionPrioritySchema.default('SHOULD_FIX').describe(
@@ -128,13 +210,6 @@ export const ObjectionShape = {
       'OPTIONAL: refinement with low incremental risk coverage — does not block acceptance.',
   ),
 } as const;
-
-export const EvidenceSchema = z.object({
-  source: z.string().min(1),
-  location: z.string().min(1),
-  note: z.string().optional(),
-});
-export type Evidence = z.infer<typeof EvidenceSchema>;
 
 /**
  * A gap in what the reviewer could actually inspect. Recording these is what
@@ -195,3 +270,122 @@ export const MemoryFactSchema = z.object({
   implication: z.string().optional().describe('Why it matters for future changes or testing.'),
 });
 export type MemoryFact = z.infer<typeof MemoryFactSchema>;
+
+/**
+ * The result of checking one citation the *author* made.
+ *
+ * Produced by codex-mcp, not by the reviewer. An author's `file:line` is a
+ * factual claim about the repository, and it is the one part of a submitted
+ * finding that can be checked without judgment — so it is checked in code,
+ * before any model sees it, and the answer is handed to the reviewer as
+ * evidence rather than left for it to re-derive.
+ *
+ * `MISSING_FILE` and `LINE_OUT_OF_RANGE` are the fabrication signatures: a model
+ * that invented a citation names a file that is not there, or a line past the
+ * end of one that is.
+ */
+export const CitationStatusSchema = z.enum([
+  'VERIFIED',
+  'MISSING_FILE',
+  'LINE_OUT_OF_RANGE',
+  'CONTENT_MISMATCH',
+  'UNPARSEABLE',
+  'OUT_OF_SCOPE',
+]);
+export type CitationStatus = z.infer<typeof CitationStatusSchema>;
+
+export const CitationCheckSchema = z.object({
+  /** Id of the candidate finding this citation was attached to. */
+  candidateId: z.string().min(1),
+  /** The citation exactly as the author wrote it. */
+  cited: z.string().min(1),
+  status: CitationStatusSchema,
+  /** Resolved repo-relative path, when one could be resolved at all. */
+  resolvedPath: z.string().optional(),
+  line: z.number().int().positive().optional(),
+  /** Total lines in the cited file, when it exists. Makes an out-of-range citation self-evident. */
+  fileLines: z.number().int().min(0).optional(),
+  /** The line the author pointed at, verbatim, so the reviewer can judge support without re-reading. */
+  citedLine: z.string().optional(),
+  /** A few lines either side, so "nearby code contradicts it" is answerable. */
+  context: z.string().optional(),
+  detail: z.string().min(1),
+});
+export type CitationCheck = z.infer<typeof CitationCheckSchema>;
+
+/** Citation statuses that mean the author pointed at something that is not there. */
+export const BROKEN_CITATION_STATUSES: readonly CitationStatus[] = ['MISSING_FILE', 'LINE_OUT_OF_RANGE'];
+
+/**
+ * Whether the reviewer judged that a verified citation actually *supports* the
+ * claim attached to it.
+ *
+ * Existence is machine-checkable and is checked in code; support is a judgment
+ * and stays with the reviewer. Splitting them is what stops "the file exists"
+ * from being reported as "the evidence holds".
+ */
+export const CitationAssessmentSchema = z.object({
+  candidateId: z.string().min(1),
+  cited: z.string().min(1),
+  supportsClaim: z
+    .enum(['SUPPORTS', 'DOES_NOT_SUPPORT', 'CONTRADICTS', 'UNRELATED', 'COULD_NOT_ASSESS'])
+    .describe('CONTRADICTS means the cited code establishes the opposite of what it was cited for.'),
+  detail: z.string().min(1),
+});
+export type CitationAssessment = z.infer<typeof CitationAssessmentSchema>;
+
+/**
+ * The failure classes a change has to be cleared against before a review can
+ * call itself finished.
+ *
+ * A list rather than prose because the failure mode is silence: a reviewer that
+ * never considered backward compatibility reports nothing about backward
+ * compatibility, and the result is indistinguishable from one that considered
+ * it and found nothing. Requiring an explicit per-class answer makes the
+ * difference visible, and the gate records every class left unanswered.
+ */
+export const RELEASE_BLOCKER_CLASSES = [
+  'security-authn-authz',
+  'data-corruption-or-loss',
+  'critical-business-rule',
+  'migration-or-deployment',
+  'backward-compatibility',
+  'availability-or-performance-collapse',
+] as const;
+
+export const ReleaseBlockerClassSchema = z.enum(RELEASE_BLOCKER_CLASSES);
+export type ReleaseBlockerClass = z.infer<typeof ReleaseBlockerClassSchema>;
+
+export const BlockerSweepEntrySchema = z.object({
+  blockerClass: ReleaseBlockerClassSchema,
+  applicable: z.boolean().describe('False only when the change cannot touch this class at all. Say why in detail.'),
+  outcome: z
+    .enum(['no-blocker-found', 'blocker-found', 'not-inspected'])
+    .describe('not-inspected is an honest answer and is recorded as a gap; a silent omission is not.'),
+  detail: z.string().min(1).describe('What you inspected, or why the class cannot apply to this change.'),
+  inspected: z.array(z.string()).default([]).describe('Files, tests, migrations, or configs you actually opened for this class.'),
+  /** Titles of findings raised from this class, so the sweep links to the output. */
+  findings: z.array(z.string()).default([]),
+});
+export type BlockerSweepEntry = z.infer<typeof BlockerSweepEntrySchema>;
+
+/**
+ * One node of a blast radius, and whether the review actually reached it.
+ *
+ * A blast-radius artifact is a list of places a change can reach. Left as
+ * prose, it is read once and forgotten; as a checklist with an inspection
+ * state, an unvisited high-risk node becomes a reportable gap instead of a
+ * silent one.
+ */
+export const CoverageNodeSchema = z.object({
+  component: z.string().min(1).describe('The component, module, service, table, or contract named by the blast radius.'),
+  risk: z.enum(['high', 'medium', 'low']).describe('How badly a defect here would land, judged from the code, not from the artifact.'),
+  inspected: z.boolean(),
+  /** Where you looked. Required when inspected is true; an inspection with no location is a claim. */
+  evidence: z.array(EvidenceSchema).default([]),
+  outcome: z
+    .enum(['no-issue-found', 'issue-found', 'unreachable', 'not-inspected'])
+    .describe('unreachable: the component is outside every root you could read.'),
+  note: z.string().optional(),
+});
+export type CoverageNode = z.infer<typeof CoverageNodeSchema>;

@@ -1,5 +1,5 @@
 import type { CandidateBug } from '../schemas/qualify-request.js';
-import { buildBasePrompt, OUTPUT_RULES, type PromptContext } from './base-reviewer.js';
+import { buildBasePrompt, OUTPUT_RULES, renderCitationChecks, type PromptContext } from './base-reviewer.js';
 
 /**
  * Independent bug-verification checks.
@@ -58,10 +58,13 @@ export function buildBugReviewPrompt(
   return [
     buildBasePrompt(context),
     renderTask(),
+    renderCitationChecks(context.citationChecks ?? []),
     renderCandidates(candidates),
     renderOutputContract(),
     OUTPUT_RULES,
-  ].join('\n\n');
+  ]
+    .filter(Boolean)
+    .join('\n\n');
 }
 
 function renderTask(): string {
@@ -109,31 +112,62 @@ ${BUG_VERIFICATION_CHECKS.map((check) => `- ${check}`).join('\n')}
 
 Then assign exactly one verdict per candidate:
 
-- \`VERIFIED\` — the defect is real and the evidence supports it.
-- \`FALSE_POSITIVE\` — the behavior does not occur, or it is correct according
-  to authoritative evidence.
-- \`NEEDS_MORE_EVIDENCE\` — plausible but unproven. List precisely what would
-  settle it in \`missingEvidence\`.
+- \`CONFIRMED\` — you traced the mechanism and it survived a contradiction search.
+- \`REFUTED\` — you **found something** that makes the claim impossible.
+- \`UNPROVEN\` — you looked and found neither support nor contradiction.
+- \`CONFLICTING_EVIDENCE\` — you found support *and* contradiction. Say what each
+  was; do not pick a side.
+- \`INSUFFICIENT_SCOPE\` — the evidence that would settle it is somewhere you
+  could not reach: another repository, a runtime, a system you have no connector
+  for. Name the place.
 - \`SEVERITY_DISAGREEMENT\` — the defect is real, the stated severity is not
   proportionate. Give your assessment and why.
 - \`DUPLICATE_OR_ALREADY_COVERED\` — another candidate, known issue, or existing
   test-management item covers it. Identify it in \`duplicateOf\`.
-- \`INCONCLUSIVE\` — evidence is materially conflicting or insufficient and no
-  responsible verdict can be reached.
 
-A \`FALSE_POSITIVE\` must cite evidence that **refutes** the claim — from code,
-requirements, runtime behavior, database state, or another authoritative source.
-"I could not reproduce it" is not a refutation; that is \`NEEDS_MORE_EVIDENCE\`.
+### The asymmetry between confirming and refuting
+
+These two are not mirror images and must not cost the same.
+
+Confirming a finding that turns out to be wrong wastes an engineer's afternoon.
+**Refuting a finding that turns out to be right ships the defect** — the author
+drops it because you said so, and nobody looks again. So refutation is the one
+conclusion here that requires you to have *found* something.
+
+\`REFUTED\` requires at least one entry in \`refutedBy\`: the guard that already
+blocks the path, the test that asserts the opposite behavior, the config that
+disables the feature, the constraint the database enforces. Point at it.
+
+\`refutedBy\` is not \`evidence\`. \`evidence\` is what you looked at, and a
+search that found nothing has plenty of that — every file you opened. \`refutedBy\`
+is what you **found** that makes the claim impossible. If you cannot name one,
+you have not refuted anything.
+
+None of these is a refutation:
+
+- "I could not reproduce it." — you lack a runtime. \`UNPROVEN\`.
+- "I searched and found no such code." — absence of proof. \`UNPROVEN\`.
+- "The author's citation does not exist." — their write-up is wrong about where
+  the evidence is. The defect may still be real. \`UNPROVEN\`, and report the
+  citation separately.
+- "It is in a repository I cannot read." — \`INSUFFICIENT_SCOPE\`.
+
+Then falsify your own refutation: look for the path around the guard you just
+found. If that search comes back \`refutes\` or \`weakens\`, both sides are on
+the table and the verdict is \`CONFLICTING_EVIDENCE\` — one reviewer does not
+adjudicate that alone.
+
+codex-mcp enforces this after you answer: a \`REFUTED\` with an empty
+\`refutedBy\` is changed to \`UNPROVEN\` and the change is reported to the
+author. You cannot overturn a finding by failing to find it.
 
 Confidence is about evidence quality, not tone. Use \`high\` only when you traced
-the relevant path and can cite what supports the verdict.
+the relevant path and can cite what supports the verdict. It is capped
+automatically when repository scope was incomplete, when the author's citations
+did not resolve, or when the mechanism is not CONFIRMED.
 
-\`VERIFIED\` at \`high\` confidence is a confirmation claim, and it carries the
-same cost as \`CONFIRMED\`: the path traced in \`verifiedPath\`, and a
-completed contradiction search in \`contradictionsChecked\`. Without them
-codex-mcp lowers both. Withdrawing an objection you could not sustain is a
-result, not a failure — record it as \`FALSE_POSITIVE\` or
-\`NEEDS_MORE_EVIDENCE\` and say what changed your mind.
+Withdrawing an objection you could not sustain is a result, not a failure —
+record it as \`UNPROVEN\` and say what changed your mind.
 
 ### Phase 2 — Independent missed-bug discovery
 
@@ -199,6 +233,22 @@ function renderOutputContract(): string {
 
 Do not pad this list. A missing test is not a bug, a code smell is not a bug,
 and a hypothetical risk is not a bug.
+
+### The author's citations
+
+- \`citationAssessments\`: one entry for every citation listed in the
+  citation-check section above that resolved on disk. Existence was already
+  settled for you; judge **support**.
+  - \`SUPPORTS\` — the cited code establishes what it was cited for.
+  - \`DOES_NOT_SUPPORT\` — it resolves, but says nothing about the claim.
+  - \`CONTRADICTS\` — the cited code establishes the *opposite*. This one is
+    real refutation evidence; put it in \`contradictoryEvidence\` too.
+  - \`UNRELATED\` / \`COULD_NOT_ASSESS\` — say why.
+- Read what sits around the cited line, not only the line. A citation that is
+  correct alone and wrong in context is the most common way a real defect gets
+  written up unconvincingly.
+- A broken or unsupported citation is reported on its own. It never becomes a
+  \`REFUTED\` verdict by itself.
 
 ### Limitations and disagreements
 

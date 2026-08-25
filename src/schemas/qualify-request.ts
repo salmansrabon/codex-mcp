@@ -88,6 +88,20 @@ export const QualifyRequestSchema = z
       branch: z.string().optional().describe('Base ref to diff HEAD against, e.g. "origin/main". Not the branch to review.'),
       /** Optional free-text note about the working state, e.g. "uncommitted changes". */
       note: z.string().optional(),
+      /**
+       * Other repositories you already know participate in this change.
+       *
+       * codex-mcp discovers most of these itself from declarations in the
+       * project — workspaces, `file:` dependencies, submodules, compose build
+       * contexts. Use this for the ones nothing declares: a contract repo, a
+       * consumer in a different checkout. Each is still access-checked, and one
+       * outside the workspace this server was launched in is reported as
+       * unreachable rather than read.
+       */
+      additionalRoots: z
+        .array(z.string().min(1))
+        .optional()
+        .describe('Absolute paths of other repositories this change depends on. Discovery finds most of them without this.'),
     }),
 
     task: z
@@ -174,6 +188,20 @@ export const QualifyRequestSchema = z
         timeoutMs: z.number().int().positive().optional(),
         /** Extra instruction appended to the reviewer prompt. Never grants permissions. */
         focus: z.string().optional(),
+        /**
+         * Run the independent risk-discovery pass. Defaults to on.
+         *
+         * It is a second Codex run, so it costs a second review's tokens. Turn
+         * it off only when you want the audit alone and accept that nothing
+         * will look for what the candidate set missed.
+         */
+        independentDiscovery: z.boolean().optional(),
+        /**
+         * Let the review read repositories discovered outside `project.root`.
+         * Defaults to on; turning it off does not hide them, it reports them as
+         * unreachable and caps confidence accordingly.
+         */
+        expandScope: z.boolean().optional(),
       })
       .optional(),
   })

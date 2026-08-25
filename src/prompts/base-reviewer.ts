@@ -3,7 +3,11 @@ import type { DatabaseEvidencePlan } from '../evidence/database.js';
 import type { ExternalEvidence } from '../evidence/external-mcp.js';
 import type { GitEvidence } from '../evidence/git.js';
 import type { RequirementEvidence } from '../evidence/jira.js';
+import type { ProjectRules } from '../evidence/project-rules.js';
+import type { RelatedRepositoryEvidence } from '../evidence/related-repositories.js';
+import type { ReviewScope } from '../review/review-scope.js';
 import type { RepositoryEvidence } from '../evidence/repository.js';
+import type { CitationCheck } from '../schemas/review-common.js';
 import { renderScopeNotice, type ScopeNotice } from '../evidence/scope.js';
 import { renderProjectMemory, type StoredFact } from '../memory/project-memory.js';
 import type { ReviewDepth } from '../review/review-depth.js';
@@ -337,6 +341,14 @@ export interface PromptContext {
   external: ExternalEvidence;
   /** Verified facts carried over from earlier reviews of this project. */
   projectMemory?: readonly StoredFact[];
+  /** Repositories this change was found to depend on, and which of them are readable. */
+  scope?: ReviewScope;
+  /** What was discovered about related repositories, before access was decided. */
+  related?: RelatedRepositoryEvidence;
+  /** Project rules retrieved for this change. */
+  rules?: ProjectRules;
+  /** Author citations already resolved against the filesystem by codex-mcp. */
+  citationChecks?: readonly CitationCheck[];
   /** Set when the review root is below the workspace the client opened. */
   scopeNotice?: ScopeNotice;
   /** Coverage the caller declared exists outside the artifact under review. */
@@ -399,6 +411,12 @@ Dot-files and dot-directories are part of the project and are yours to read.${co
 
   const scope = renderScopeNotice(context.scopeNotice);
   if (scope) sections.push(scope);
+
+  const reviewScope = renderReviewScope(context);
+  if (reviewScope) sections.push(reviewScope);
+
+  const rules = renderProjectRules(context.rules);
+  if (rules) sections.push(rules);
 
   sections.push(renderGit(context.git));
   sections.push(renderRequirement(context.requirement));
@@ -568,7 +586,33 @@ function renderEvidenceSources(context: PromptContext): string {
         lines.push(`  capabilities: ${connector.normalizedCapabilities.join(', ')}`);
       }
     }
-    lines.push('', 'Every one of these is read-only. Mutating operations were withheld by policy, not omitted by accident.');
+    lines.push(
+      '',
+      'Every one of these is read-only. Mutating operations were withheld by policy, not omitted by accident.',
+      '',
+      '**Choose a source by the kind of claim, not by what is available.** Calling',
+      'every connector on every claim is slow and produces evidence nobody asked',
+      'for; calling none is how a claim about persisted state gets settled from',
+      'source code alone.',
+      '',
+      '- A claim about *intended behavior* — the requirement system. What the code',
+      '  does is not evidence of what it should do.',
+      '- A claim about *persisted state, constraints, or existing data* — the',
+      '  database. A schema file is a claim about the database; the database is the',
+      '  database.',
+      '- A claim about *when and why something changed* — git history and blame.',
+      '  A defect that arrived with this change and one that predates it need',
+      '  different responses.',
+      '- A claim about *runtime or rendered behavior* — a runtime or browser',
+      '  connector if one is listed. If none is, that claim is `UNPROVEN` on this',
+      '  evidence, not refuted.',
+      '- A claim about *code structure, guards, or call paths* — the code itself.',
+      '  Do not go to a connector for something a file answers.',
+      '',
+      'If the source that would settle a claim is not in the list above, say so in',
+      '`limitations`, name the source, and lower the confidence. Do not substitute',
+      'a source that cannot answer the question and report the result as if it did.',
+    );
   }
 
   if (context.database.available) {
@@ -612,4 +656,163 @@ export function buildBasePrompt(context: PromptContext): string {
     // to the output.
     SELF_AUDIT,
   ].join('\n\n');
+}
+
+/**
+ * What else participates in this change, and which of it you can actually read.
+ *
+ * Split into readable and unreadable on purpose. The readable roots widen the
+ * boundary — the reviewer is told, explicitly, that "stay inside the project
+ * root" now means these roots, because a rule that forbids following a contract
+ * into the repository that defines it produces a confident review of half a
+ * system. The unreadable ones are named rather than omitted, so a judgment that
+ * depends on one can be recorded as scope-limited instead of guessed.
+ */
+function renderReviewScope(context: PromptContext): string {
+  const scope = context.scope;
+  const related = context.related;
+  if (!scope && !related) return '';
+
+  const lines = ['## Review scope — which repositories are in play', ''];
+
+  const additional = scope?.additionalRoots ?? [];
+  if (additional.length > 0) {
+    lines.push(
+      'This change does not live in one repository. These were discovered from',
+      'declarations in the project itself, and you may read them:',
+      '',
+      ...additional.map(
+      (root: { path: string; kind: string; declaredBy: string; detail: string }) =>
+        `- ${root.path}\n  ${root.kind}, declared by ${root.declaredBy || 'the caller'} — ${root.detail}`,
+    ),
+      '',
+      'Follow a contract, a package, a schema, or a caller into these roots when a',
+      'judgment turns on it. Reading them is in scope; guessing about them is not.',
+    );
+  }
+
+  const unreachable = scope?.unreachableRoots ?? [];
+  if (unreachable.length > 0) {
+    lines.push(
+      '',
+      '**Discovered and NOT readable from here:**',
+      '',
+      ...unreachable.map((root: { path: string; kind: string; reason: string }) => `- ${root.path} (${root.kind}) — ${root.reason}`),
+      '',
+      'These participate in the change and you cannot see them. Any finding that',
+      'depends on one is `INSUFFICIENT_SCOPE`, not confirmed and not refuted, and',
+      'the gap belongs in `limitations` naming the repository.',
+    );
+  }
+
+  if (additional.length === 0 && unreachable.length === 0) {
+    lines.push('No other repository was found to participate in this change.');
+  }
+
+  for (const note of related?.notes ?? []) lines.push('', `Note: ${note}`);
+
+  return lines.join('\n');
+}
+
+/**
+ * The project's own rules, retrieved for this change rather than dumped whole.
+ *
+ * These are evidence, not background. A project that has written down how it
+ * handles a thing has already decided it, and a reviewer that objects against
+ * its own preferences instead of the project's standard is wrong in a way that
+ * is expensive to argue with.
+ */
+function renderProjectRules(rules: ProjectRules | undefined): string {
+  if (!rules || rules.discovered.length === 0) return '';
+
+  const lines = [
+    '## Project rules that apply to this change',
+    '',
+    'These were retrieved by matching the change against the project\'s own',
+    'instructions, rules, skills, and architecture decisions. **Treat an',
+    'applicable rule as source of truth**, above your own preference: a project',
+    'that has written a rule down has already had this argument.',
+    '',
+    'If the change violates one, that is a finding, and cite the rule as the',
+    'evidence. If a rule contradicts what the code does and you cannot tell which',
+    'is authoritative, that is a disagreement to record, not one to settle.',
+  ];
+
+  for (const rule of rules.selected) {
+    lines.push(
+      '',
+      `### ${rule.path} (${rule.kind})`,
+      '',
+      `Retrieved because: ${rule.reason}.`,
+      '',
+      '```markdown',
+      rule.content.trimEnd(),
+      '```',
+      ...(rule.truncated ? ['', `(truncated — read ${rule.path} directly for the rest)`] : []),
+    );
+  }
+
+  const unread = rules.discovered.filter(
+    (candidate) => !rules.selected.some((selected) => selected.path === candidate.path),
+  );
+  if (unread.length > 0) {
+    lines.push(
+      '',
+      '### Further rule documents found and not loaded',
+      '',
+      unread.map((rule) => `- ${rule.path} (${rule.kind})`).join('\n'),
+      '',
+      'Retrieval chose the ones above as most relevant to this change. These were',
+      'not loaded, not judged irrelevant — open any of them yourself if a judgment',
+      'turns on it.',
+    );
+  }
+
+  for (const note of rules.notes) lines.push('', `Note: ${note}`);
+
+  return lines.join('\n');
+}
+
+/**
+ * The author's own citations, already resolved against the filesystem.
+ *
+ * Handed over as settled fact so the reviewer spends its budget on the part
+ * that needs judgment — whether the cited code supports the claim — rather than
+ * re-establishing whether the file exists. The warning attached to a broken
+ * citation is the important half: a fabricated reference is a defect in the
+ * write-up, and treating it as a refutation of the underlying finding is the
+ * error this whole path exists to prevent.
+ */
+export function renderCitationChecks(checks: readonly CitationCheck[]): string {
+  if (checks.length === 0) return '';
+
+  const lines = [
+    '## The author\'s citations, checked against the filesystem',
+    '',
+    'codex-mcp resolved every `file:line` the author cited before this prompt was',
+    'built. These results are facts, not claims — do not re-derive them.',
+    '',
+    'Your job is the part that needs judgment: for each citation that resolved,',
+    'does the cited code actually support the claim it was attached to, and does',
+    'anything next to it contradict the claim? Record that in',
+    '`citationAssessments`.',
+    '',
+    '**A broken citation is not a refutation.** It means the author pointed at the',
+    'wrong place. The defect they described may still be real, and if you cannot',
+    'find it yourself the verdict is `UNPROVEN`, never `REFUTED`.',
+  ];
+
+  for (const check of checks) {
+    lines.push(
+      '',
+      `### ${check.candidateId} cites \`${check.cited}\` — ${check.status}`,
+      '',
+      check.detail,
+    );
+    if (check.context) {
+      lines.push('', '```', check.context, '```');
+    }
+  }
+
+  return lines.join('\n');
 }

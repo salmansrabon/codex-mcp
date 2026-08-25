@@ -57,6 +57,10 @@ const request = {
   reviewType: 'test-design' as const,
   project: { root: '' },
   candidate: { testCases: CANDIDATE_TEST_CASES },
+  // These tests count invocations to pin the repair loop at exactly one retry.
+  // The discovery run is a second review path with its own repair loop, so it
+  // is disabled here and covered by its own tests.
+  options: { independentDiscovery: false },
 };
 
 function invocationCount(): number {

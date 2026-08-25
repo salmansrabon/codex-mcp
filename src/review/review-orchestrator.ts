@@ -4,8 +4,10 @@ import type { Config } from '../config/config.js';
 import { collectArtifacts } from '../evidence/artifacts.js';
 import { planDatabaseEvidence } from '../evidence/database.js';
 import { collectExternalEvidence } from '../evidence/external-mcp.js';
-import { collectGitEvidence } from '../evidence/git.js';
+import { collectGitEvidence, type GitEvidence } from '../evidence/git.js';
 import { planRequirementEvidence } from '../evidence/jira.js';
+import { collectProjectRules } from '../evidence/project-rules.js';
+import { collectRelatedRepositories } from '../evidence/related-repositories.js';
 import { collectRepositoryEvidence } from '../evidence/repository.js';
 import { CodexMcpError, toCodexMcpError } from '../errors/codex-mcp-error.js';
 import { ErrorCodes } from '../errors/codes.js';
@@ -27,8 +29,12 @@ import { newReviewId } from '../util/ids.js';
 import type { Logger } from '../util/logger.js';
 import { safePathIdentifier } from '../util/redact.js';
 import { buildBrokerLaunchSpec } from './broker-launcher.js';
+import { verifyCandidateCitations } from './citation-verifier.js';
 import { reviewCombined, worstStatus } from './combined-reviewer.js';
 import { assessReviewDepth } from './review-depth.js';
+import { readableRoots, resolveReviewScope } from './review-scope.js';
+import { compareWithCandidates } from './risk-discovery-reviewer.js';
+import type { EvidenceCoverage } from './verification-gate.js';
 
 const SUPPORTED_REVIEW_TYPES = ReviewTypeSchema.options;
 
@@ -194,14 +200,22 @@ export class ReviewOrchestrator {
       useExternalMcps: request.options?.useExternalMcps ?? true,
     };
 
-    const [repository, git, artifacts, external, projectMemory] = await Promise.all([
+    const [repository, git, artifacts, external, projectMemory, related] = await Promise.all([
       collectRepositoryEvidence(projectRoot),
       this.config.permissions.gitRead
         ? collectGitEvidence(projectRoot, logger, request.project.branch)
-        : Promise.resolve({ available: false, notes: ['Git read access is disabled by configuration.'] }),
+        : Promise.resolve<GitEvidence>({ available: false, notes: ['Git read access is disabled by configuration.'] }),
       collectArtifacts(projectRoot, this.permissions, request.artifacts ?? {}, this.config.maxArtifactBytes),
       collectExternalEvidence(this.config, this.permissions, selection, logger, this.consent, reviewId),
       this.memory.retrieve(projectRoot, MEMORY_CONTEXT_LIMIT),
+      // Which other repositories this change actually depends on, read out of
+      // the project's own declarations. Runs before anything decides what the
+      // review may see, so a refused dependency is a named gap rather than an
+      // invisible one.
+      collectRelatedRepositories(projectRoot, {
+        workspaceRoot: this.config.sources.cwd,
+        ...(request.project.additionalRoots ? { declaredRoots: request.project.additionalRoots } : {}),
+      }),
     ]);
 
     try {
@@ -221,6 +235,60 @@ export class ReviewOrchestrator {
           unreachableSiblings: scopeNotice.unreachableSiblings.length,
         });
       }
+
+      // Access is decided separately from discovery: `scope.additionalRoots` is
+      // what widens the reviewer's boundary, and `scope.unreachableRoots` is
+      // what caps its confidence and lands in `limitations` by name.
+      const scope = await resolveReviewScope({
+        projectRoot,
+        workspaceRoot: this.config.sources.cwd,
+        related,
+        allowExpansion: request.options?.expandScope ?? true,
+      });
+      if (scope.additionalRoots.length > 0 || scope.unreachableRoots.length > 0) {
+        logger.info('review scope resolved across repositories', {
+          additionalRoots: scope.additionalRoots.length,
+          unreachableRoots: scope.unreachableRoots.length,
+        });
+      }
+
+      // Rules are retrieved against this change rather than loaded wholesale: a
+      // reviewer handed every rule in the repository reads none of them.
+      const rules = await collectProjectRules(projectRoot, {
+        changedFiles: git.changedFiles ?? [],
+        terms: [
+          ...testCases.map((testCase) => testCase.title),
+          ...bugs.map((bug) => `${bug.title} ${bug.component ?? ''}`),
+          request.task?.title ?? '',
+          request.task?.description ?? '',
+          ...(request.task?.acceptanceCriteria ?? []),
+          request.options?.focus ?? '',
+        ].filter(Boolean),
+      });
+
+      // Every `file:line` the author cited, resolved against the filesystem
+      // before the prompt exists. It is a fact, so it is settled in code; the
+      // reviewer is left with the part that needs judgment.
+      const citations = await verifyCandidateCitations(bugs, { roots: readableRoots(scope) });
+      if (citations.broken.size > 0) {
+        logger.warn('author citations do not resolve', {
+          broken: citations.broken.size,
+          checked: citations.checks.length,
+        });
+      }
+
+      const coverage: EvidenceCoverage = {
+        scopeComplete: scope.complete && !scopeNotice,
+        citationsPresent: citations.present,
+        citationsVerified: citations.verified,
+        brokenCitations: citations.broken,
+        scopeGaps: [
+          ...scope.gaps,
+          ...(scopeNotice
+            ? [`the review root sits below the workspace, so ${scopeNotice.unreachableSiblings.join(', ')} are not readable`]
+            : []),
+        ],
+      };
 
       // Depth is decided from the change set before the prompt exists, so the
       // reviewer receives a budget rather than choosing one. A model asked how
@@ -242,6 +310,10 @@ export class ReviewOrchestrator {
         ...(request.project.note ? { projectNote: request.project.note } : {}),
         repository,
         git,
+        scope,
+        related,
+        rules,
+        citationChecks: citations.checks,
         requirement,
         artifacts,
         database,
@@ -266,17 +338,34 @@ export class ReviewOrchestrator {
         ...(broker ? { broker } : {}),
         timeoutMs,
         reasoningEffort: depth.reasoningEffort,
+        coverage,
+        citationChecks: citations.checks,
+        // The unanchored pass is on by default. Its whole value is answering
+        // "what did the author miss", which the audit path structurally cannot.
+        independentDiscovery: request.options?.independentDiscovery ?? true,
         ...(signal ? { signal } : {}),
       });
 
       const statuses: ReviewStatus[] = [];
       if (outcome.testDesign) statuses.push(outcome.testDesign.status);
       if (outcome.bugs) statuses.push(outcome.bugs.status);
+      if (outcome.riskDiscovery) statuses.push(outcome.riskDiscovery.status);
+
+      // Comparison happens here, after both paths finished, and never inside
+      // either prompt: a discovery run told what the author already has stops
+      // being a discovery run.
+      const riskOverlap = outcome.riskDiscovery
+        ? compareWithCandidates(outcome.riskDiscovery.findings, { testCases, bugs })
+        : undefined;
 
       // Persisted after validation, from data that already passed the schema.
       // A memory failure must not fail a review that otherwise succeeded.
       await this.memory
-        .persist(projectRoot, [...(outcome.testDesign?.projectMemory ?? []), ...(outcome.bugs?.projectMemory ?? [])])
+        .persist(projectRoot, [
+          ...(outcome.testDesign?.projectMemory ?? []),
+          ...(outcome.bugs?.projectMemory ?? []),
+          ...(outcome.riskDiscovery?.projectMemory ?? []),
+        ])
         .catch((error: unknown) => {
           logger.warn('project memory not persisted', { error: error instanceof Error ? error.message : String(error) });
         });
@@ -290,6 +379,8 @@ export class ReviewOrchestrator {
         status: worstStatus(statuses),
         ...(outcome.testDesign ? { testDesign: outcome.testDesign } : {}),
         ...(outcome.bugs ? { bugs: outcome.bugs } : {}),
+        ...(outcome.riskDiscovery ? { riskDiscovery: outcome.riskDiscovery } : {}),
+        ...(riskOverlap ? { riskOverlap } : {}),
         meta: {
           ...(this.config.model ? { model: this.config.model } : {}),
           reasoningEffort: depth.reasoningEffort,
@@ -311,6 +402,17 @@ export class ReviewOrchestrator {
             testCharter: artifacts.testCharter.present,
             requirement: requirement.independentlyReadable || requirement.supplied,
             connectors: external.evidence.usable,
+            scope: {
+              complete: coverage.scopeComplete,
+              additionalRoots: scope.additionalRoots.map((root) => root.path),
+              unreachableRoots: scope.unreachableRoots.map((root) => root.path),
+              gaps: [...coverage.scopeGaps],
+            },
+            projectRules: {
+              discovered: rules.discovered.length,
+              applied: rules.selected.map((rule) => rule.path),
+            },
+            citations: { checked: citations.checks.length, broken: citations.broken.size },
           },
         },
         reconciliation: {
@@ -325,6 +427,8 @@ export class ReviewOrchestrator {
         durationMs,
         outputRepairAttempts: outcome.repairAttempts,
         codexCommandCount: outcome.attemptedCommands.length,
+        scopeComplete: coverage.scopeComplete,
+        newRisksFound: riskOverlap?.filter((entry) => entry.relation === 'NEW').length ?? 0,
         ...(outcome.usage ? { tokenUsage: outcome.usage } : {}),
         connectors: external.evidence.usable,
       });

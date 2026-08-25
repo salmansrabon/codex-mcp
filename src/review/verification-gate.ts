@@ -1,6 +1,8 @@
 import type { CandidateTestCase } from '../schemas/qualify-request.js';
-import type { BugFinding, BugReviewResult } from '../schemas/bug-review-result.js';
-import type { Limitation, VerificationStatus } from '../schemas/review-common.js';
+import type { BugFinding, BugReviewResult, BugVerdict } from '../schemas/bug-review-result.js';
+import { RELEASE_BLOCKER_CLASSES } from '../schemas/review-common.js';
+import type { Confidence, Limitation, VerificationStatus } from '../schemas/review-common.js';
+import type { RiskDiscoveryResult } from '../schemas/risk-discovery-result.js';
 import type { MissingEntry, ModifyEntry, RemoveEntry, TestReviewResult } from '../schemas/test-review-result.js';
 
 /**
@@ -38,9 +40,51 @@ export interface GateAdjustment {
 interface Verifiable {
   verificationStatus: VerificationStatus;
   verifiedPath: string[];
-  contradictionsChecked: { outcome: 'no-contradiction-found' | 'weakens' | 'refutes' | 'unresolved'; checked: string }[];
+  contradictionsChecked: {
+    outcome: 'no-contradiction-found' | 'weakens' | 'refutes' | 'unresolved';
+    checked: string;
+    contradictoryEvidence?: { source: string; location: string; note?: string }[];
+  }[];
   impactConfidence?: 'low' | 'medium' | 'high';
   scopeCaveat?: string;
+}
+
+/**
+ * What the review could actually see, assembled by the orchestrator from
+ * evidence collection rather than from anything the reviewer said.
+ *
+ * Confidence is capped from this. A reviewer that could not read a participating
+ * repository, or whose subject cited a file that does not exist, has a ceiling
+ * on how sure it is allowed to sound — and that ceiling is a fact about the
+ * review, not a judgment the reviewer gets to make about itself.
+ */
+export interface EvidenceCoverage {
+  /** False when a discovered related repository, or a narrowed scope, left part of the system unreadable. */
+  scopeComplete: boolean;
+  /** Candidate ids that cited something at all. A finding with no citations has nothing to verify. */
+  citationsPresent: ReadonlySet<string>;
+  /** Candidate ids whose author citations were all resolved on disk. */
+  citationsVerified: ReadonlySet<string>;
+  /** Candidate ids with at least one citation that named a file or line that is not there. */
+  brokenCitations: ReadonlySet<string>;
+  /** Human-readable reasons scope is incomplete, for the limitation text. */
+  scopeGaps: readonly string[];
+}
+
+export const FULL_COVERAGE: EvidenceCoverage = {
+  scopeComplete: true,
+  citationsPresent: new Set(),
+  citationsVerified: new Set(),
+  brokenCitations: new Set(),
+  scopeGaps: [],
+};
+
+const CONFIDENCE_RANK: Record<Confidence, number> = { low: 0, medium: 1, high: 2 };
+
+/** Lower a confidence to a ceiling. Never raises — a cap is not a grant. */
+function capConfidence(current: Confidence | undefined, ceiling: Confidence): Confidence | undefined {
+  if (current === undefined) return undefined;
+  return CONFIDENCE_RANK[current] > CONFIDENCE_RANK[ceiling] ? ceiling : current;
 }
 
 /**
@@ -258,39 +302,324 @@ export interface BugGateOutcome {
 }
 
 /**
+ * Why a `REFUTED` verdict may not stand, or `undefined` when it may.
+ *
+ * This is the single most important rule in the file. Overturning somebody
+ * else's finding is the most destructive thing this reviewer can do — the
+ * author drops a real defect and ships — and it is also the easiest conclusion
+ * to reach badly, because "I searched and found nothing" feels identical from
+ * the inside to "I searched and found the thing that makes this impossible".
+ *
+ * So a refutation must produce something. A contradiction check with
+ * `outcome: 'refutes'` and at least one piece of cited contradictory evidence
+ * is the price. Everything short of it lands on a verdict that leaves the
+ * author's finding standing:
+ *
+ *  - nothing was reachable            -> `INSUFFICIENT_SCOPE`
+ *  - looked, found nothing either way -> `UNPROVEN`
+ *  - found support *and* contradiction -> `CONFLICTING_EVIDENCE`
+ */
+function refutationBlocker(finding: BugFinding): { verdict: BugVerdict; reason: string } | undefined {
+  if (finding.verdict !== 'REFUTED') return undefined;
+
+  // Read defensively: a caller constructing a finding by hand must get a
+  // downgrade rather than a crash — a thrown gate would fail the review open.
+  const checks = finding.contradictionsChecked ?? [];
+  const refutedBy = finding.refutedBy ?? [];
+
+  // The whole rule, in one condition. `evidence` is what the reviewer looked
+  // at, and a failed search has plenty of that; `refutedBy` is what it found
+  // that makes the claim impossible, and an empty search cannot produce any.
+  if (refutedBy.length === 0) {
+    const everythingUnresolved = checks.length > 0 && checks.every((check) => check.outcome === 'unresolved');
+    return {
+      verdict: everythingUnresolved ? 'INSUFFICIENT_SCOPE' : 'UNPROVEN',
+      reason: everythingUnresolved
+        ? 'every check it ran was left unresolved, so nothing was established either way'
+        : 'it cites nothing in `refutedBy` that makes the claim impossible — failing to find support is not contradiction',
+    };
+  }
+
+  // The reviewer's own falsification of its refutation came back against it:
+  // it found the guard, and then found a path around the guard. Both sides are
+  // now on the table and one reviewer does not get to pick.
+  const selfRefuted = checks.find((check) => check.outcome === 'refutes' || check.outcome === 'weakens');
+  if (selfRefuted) {
+    return {
+      verdict: 'CONFLICTING_EVIDENCE',
+      reason: `it cites contradicting evidence but its own check ("${selfRefuted.checked}") came back against the refutation`,
+    };
+  }
+
+  return undefined;
+}
+
+/**
+ * The confidence ceiling this finding has earned, given what the review could
+ * see.
+ *
+ * Confidence is meant to describe how certain the *mechanism* is, and left to
+ * itself a model reports how certain its prose sounds. These caps re-anchor it
+ * to evidence coverage. Each returns a ceiling and a reason; the lowest wins.
+ */
+function confidenceCeiling(
+  finding: BugFinding,
+  coverage: EvidenceCoverage,
+): { ceiling: Confidence; reason: string } | undefined {
+  const caps: { ceiling: Confidence; reason: string }[] = [];
+
+  if (!coverage.scopeComplete) {
+    caps.push({
+      ceiling: 'medium',
+      reason: `part of the system could not be read (${coverage.scopeGaps.join('; ') || 'incomplete repository scope'})`,
+    });
+  }
+
+  // Overturning a finding whose evidence you never managed to check is the
+  // fabricated-citation failure in reverse: the citation being broken says
+  // something about the author's write-up, not about whether the defect exists.
+  // Only when the author actually cited something that failed to resolve. A
+  // finding that cited nothing has no unchecked premise — it has no premise,
+  // which the other rules already handle.
+  if (
+    finding.verdict === 'REFUTED' &&
+    coverage.citationsPresent.has(finding.candidateId) &&
+    !coverage.citationsVerified.has(finding.candidateId)
+  ) {
+    caps.push({
+      ceiling: 'medium',
+      reason: "the author's own citations for this finding did not resolve, so the refutation rests on an unchecked premise",
+    });
+  }
+
+  if (finding.verdict === 'CONFLICTING_EVIDENCE') {
+    caps.push({ ceiling: 'medium', reason: 'the evidence points both ways' });
+  }
+
+  if (finding.verdict === 'UNPROVEN' || finding.verdict === 'INSUFFICIENT_SCOPE') {
+    caps.push({ ceiling: 'low', reason: 'nothing was established either way' });
+  }
+
+  if (finding.verificationStatus !== 'CONFIRMED') {
+    caps.push({ ceiling: 'medium', reason: `the mechanism is only ${finding.verificationStatus}` });
+  }
+
+  if (caps.length === 0) return undefined;
+  return caps.reduce((lowest, current) => (CONFIDENCE_RANK[current.ceiling] < CONFIDENCE_RANK[lowest.ceiling] ? current : lowest));
+}
+
+/**
  * Gate bug verdicts.
  *
- * The extra rule here is that `VERIFIED` plus `confidence: high` is itself a
- * confirmation claim, whatever `verificationStatus` says. A verdict that
- * asserts a defect is real at high confidence, without a recorded contradiction
- * search, is the same failure in a different field — so the confidence follows
- * the verification status down.
+ * Three rules, in order: a refutation must have produced contradictory
+ * evidence; a claim may not call itself CONFIRMED without a trace and a
+ * completed contradiction search; and confidence may not exceed what the
+ * review's evidence coverage supports.
  */
 export function gateBugReview(input: {
   findings: readonly BugFinding[];
   additionalFindings: BugReviewResult['additionalFindings'];
+  coverage?: EvidenceCoverage;
 }): BugGateOutcome {
+  const coverage = input.coverage ?? FULL_COVERAGE;
   const adjustments: GateAdjustment[] = [];
+  const refutations: GateAdjustment[] = [];
+  const confidenceCaps: GateAdjustment[] = [];
 
   const findings = input.findings.map((finding) => {
-    const gated = gateEntry(finding, finding.candidateId, adjustments);
-    const downgraded = gated.verificationStatus !== finding.verificationStatus;
+    let current: BugFinding = finding;
 
-    if (downgraded && finding.verdict === 'VERIFIED' && finding.confidence === 'high') {
-      adjustments.push({
-        subject: finding.candidateId,
-        detail: 'confidence was lowered from high to medium: a VERIFIED verdict at high confidence is itself a confirmation claim.',
+    // 1. Refutation discipline, before anything else: the verdict decides which
+    //    confidence rules apply, so it has to be settled first.
+    const blocked = refutationBlocker(current);
+    if (blocked) {
+      refutations.push({
+        subject: current.candidateId,
+        detail: `REFUTED was changed to ${blocked.verdict} because ${blocked.reason}. The author's finding stands until contradicted.`,
       });
-      return { ...gated, confidence: 'medium' as const };
+      current = {
+        ...current,
+        verdict: blocked.verdict,
+        recommendation:
+          `codex-mcp did not overturn this finding: ${blocked.reason}. ` +
+          `Original reviewer recommendation: ${current.recommendation}`,
+      };
     }
-    return gated;
+
+    // 2. Confirmation discipline on the mechanism.
+    current = gateEntry(current, current.candidateId, adjustments);
+
+    // 3. Confidence, capped by evidence coverage rather than by tone.
+    const ceiling = confidenceCeiling(current, coverage);
+    if (ceiling) {
+      const capped = capConfidence(current.confidence, ceiling.ceiling);
+      if (capped && capped !== current.confidence) {
+        confidenceCaps.push({
+          subject: current.candidateId,
+          detail: `confidence was capped from ${current.confidence} to ${capped} because ${ceiling.reason}.`,
+        });
+        current = { ...current, confidence: capped };
+      }
+    }
+
+    return current;
   });
 
-  const additionalFindings = input.additionalFindings.map((finding) => gateEntry(finding, finding.title, adjustments));
+  const additionalFindings = input.additionalFindings.map((finding) => {
+    const gated = gateEntry(finding, finding.title, adjustments);
+    if (coverage.scopeComplete || gated.impactConfidence !== 'high') return gated;
+    confidenceCaps.push({
+      subject: gated.title,
+      detail: `impact confidence was capped from high to medium because ${coverage.scopeGaps.join('; ') || 'repository scope was incomplete'}.`,
+    });
+    return { ...gated, impactConfidence: 'medium' as const };
+  });
 
   const limitations: Limitation[] = [];
   const note = adjustmentLimitation('verification-discipline', adjustments);
   if (note) limitations.push(note);
 
+  if (refutations.length > 0) {
+    limitations.push({
+      area: 'refutation-discipline',
+      detail: refutations.map((adjustment) => `${adjustment.subject}: ${adjustment.detail}`).join(' '),
+      impact:
+        'A finding is only overturned by evidence that contradicts it. These were downgraded rather than refuted, ' +
+        'which means the author keeps them and must resolve them another way.',
+      material: false,
+      affects: [...new Set(refutations.map((adjustment) => adjustment.subject))],
+    });
+  }
+
+  const capNote = adjustmentLimitation('confidence-calibration', confidenceCaps);
+  if (capNote) limitations.push(capNote);
+
   return { findings, additionalFindings, limitations };
+}
+
+export interface RiskGateOutcome {
+  findings: RiskDiscoveryResult['findings'];
+  blockerSweep: RiskDiscoveryResult['blockerSweep'];
+  coverageMap: RiskDiscoveryResult['coverageMap'];
+  limitations: Limitation[];
+}
+
+export interface RiskGateInput {
+  findings: RiskDiscoveryResult['findings'];
+  blockerSweep: RiskDiscoveryResult['blockerSweep'];
+  coverageMap: RiskDiscoveryResult['coverageMap'];
+  coverage?: EvidenceCoverage;
+  /** True when a blast-radius artifact was supplied, which is what makes an unvisited node a real gap. */
+  blastRadiusSupplied: boolean;
+}
+
+/**
+ * Gate independent discovery.
+ *
+ * Confirmation discipline applies to discovered findings exactly as it does to
+ * verdicts. Two rules are specific to this path, and both exist because their
+ * failure mode is a review that looks finished:
+ *
+ *  - **An unanswered blocker class is reported, not assumed clear.** Silence
+ *    about backward compatibility is indistinguishable from a clean bill of
+ *    health unless something writes down which one happened.
+ *  - **An uninspected high-risk blast-radius node makes the review material.**
+ *    Not a note in the margin — `material: true`, which drives the whole review
+ *    to `INCONCLUSIVE`. Concluding while a high-risk component sits unopened is
+ *    the specific thing a coverage map exists to prevent, so it has to cost
+ *    something.
+ */
+export function gateRiskDiscovery(input: RiskGateInput): RiskGateOutcome {
+  const coverage = input.coverage ?? FULL_COVERAGE;
+  const adjustments: GateAdjustment[] = [];
+  const confidenceCaps: GateAdjustment[] = [];
+  const limitations: Limitation[] = [];
+
+  const findings = input.findings.map((finding) => {
+    let gated = gateEntry(finding, finding.title, adjustments);
+
+    if (!coverage.scopeComplete && gated.impactConfidence === 'high') {
+      confidenceCaps.push({
+        subject: gated.title,
+        detail: `impact confidence was capped from high to medium because ${coverage.scopeGaps.join('; ')}.`,
+      });
+      gated = { ...gated, impactConfidence: 'medium' as const };
+    }
+
+    // A release-blocking claim is the strongest thing this path can say, and an
+    // untraced one is an alarm rather than a finding. It keeps the finding and
+    // loses the claim to block.
+    if (gated.releaseBlocking && gated.verificationStatus === 'HYPOTHESIS') {
+      adjustments.push({
+        subject: gated.title,
+        detail: 'releaseBlocking was withdrawn: a blocker whose mechanism is only a hypothesis is a lead to investigate, not a stop-ship.',
+      });
+      gated = { ...gated, releaseBlocking: false };
+    }
+
+    return gated;
+  });
+
+  const answered = new Set(input.blockerSweep.map((entry) => entry.blockerClass));
+  const unanswered = RELEASE_BLOCKER_CLASSES.filter((blockerClass) => !answered.has(blockerClass));
+  const notInspected = input.blockerSweep.filter((entry) => entry.applicable && entry.outcome === 'not-inspected');
+
+  if (unanswered.length > 0 || notInspected.length > 0) {
+    const parts: string[] = [];
+    if (unanswered.length > 0) parts.push(`never considered: ${unanswered.join(', ')}`);
+    if (notInspected.length > 0) {
+      parts.push(`considered but not inspected: ${notInspected.map((entry) => entry.blockerClass).join(', ')}`);
+    }
+    limitations.push({
+      area: 'release-blocker-sweep',
+      detail: `The release-blocker sweep is incomplete — ${parts.join('; ')}.`,
+      impact:
+        'A blocker class nobody inspected has not been cleared. Do not read the absence of a finding in these classes as their absence in the change.',
+      material: false,
+      affects: [...unanswered, ...notInspected.map((entry) => entry.blockerClass)],
+    });
+  }
+
+  // A sweep that says it found a blocker and names no finding has lost it
+  // somewhere between the two fields; that is worth saying out loud.
+  const danglingBlockers = input.blockerSweep.filter(
+    (entry) => entry.outcome === 'blocker-found' && entry.findings.length === 0,
+  );
+  if (danglingBlockers.length > 0) {
+    limitations.push({
+      area: 'release-blocker-sweep',
+      detail: `These classes reported a blocker without naming the finding that carries it: ${danglingBlockers
+        .map((entry) => entry.blockerClass)
+        .join(', ')}.`,
+      impact: 'The blocker was asserted but not written up. Treat the class as unresolved.',
+      material: false,
+      affects: danglingBlockers.map((entry) => entry.blockerClass),
+    });
+  }
+
+  const unvisitedHighRisk = input.coverageMap.filter(
+    (node) => node.risk === 'high' && (!node.inspected || node.outcome === 'not-inspected' || node.outcome === 'unreachable'),
+  );
+  if (unvisitedHighRisk.length > 0) {
+    limitations.push({
+      area: 'blast-radius-coverage',
+      detail: `High-risk components in the blast radius were not inspected: ${unvisitedHighRisk
+        .map((node) => `${node.component} (${node.outcome})`)
+        .join(', ')}.`,
+      impact:
+        'The review reached a conclusion with high-risk affected components unopened. Its silence about them is not a clean result.',
+      // Material only when a blast radius was actually supplied: inventing an
+      // INCONCLUSIVE out of a coverage map the reviewer volunteered would
+      // punish the reviewer for being thorough about its own gaps.
+      material: input.blastRadiusSupplied,
+      affects: unvisitedHighRisk.map((node) => node.component),
+    });
+  }
+
+  const note = adjustmentLimitation('verification-discipline', adjustments);
+  if (note) limitations.push(note);
+  const capNote = adjustmentLimitation('confidence-calibration', confidenceCaps);
+  if (capNote) limitations.push(capNote);
+
+  return { findings, blockerSweep: input.blockerSweep, coverageMap: input.coverageMap, limitations };
 }

@@ -133,38 +133,43 @@ describe('deriveBugReviewStatus', () => {
   const clean = { status: 'PASS' as const, additionalFindings: [], disagreements: [] };
 
   it('returns PASS when every candidate is verified and nothing else is pending', () => {
-    expect(deriveBugReviewStatus(clean, [finding('VERIFIED')], [])).toBe('PASS');
+    expect(deriveBugReviewStatus(clean, [finding('CONFIRMED')], [])).toBe('PASS');
   });
 
-  it.each(['FALSE_POSITIVE', 'SEVERITY_DISAGREEMENT', 'DUPLICATE_OR_ALREADY_COVERED'] as const)(
+  it.each(['REFUTED', 'SEVERITY_DISAGREEMENT', 'DUPLICATE_OR_ALREADY_COVERED'] as const)(
     'returns CHANGES_REQUIRED for a %s verdict',
     (verdict) => {
       expect(deriveBugReviewStatus(clean, [finding(verdict)], [])).toBe('CHANGES_REQUIRED');
     },
   );
 
-  it.each(['NEEDS_MORE_EVIDENCE', 'INCONCLUSIVE'] as const)('returns INCONCLUSIVE for a %s verdict', (verdict) => {
-    expect(deriveBugReviewStatus(clean, [finding(verdict)], [])).toBe('INCONCLUSIVE');
-  });
+  // Every verdict that leaves the claim unsettled, including the one where the
+  // reviewer found both sides and deliberately declined to pick.
+  it.each(['UNPROVEN', 'CONFLICTING_EVIDENCE', 'INSUFFICIENT_SCOPE'] as const)(
+    'returns INCONCLUSIVE for a %s verdict',
+    (verdict) => {
+      expect(deriveBugReviewStatus(clean, [finding(verdict)], [])).toBe('INCONCLUSIVE');
+    },
+  );
 
   it('lets an unreached verdict outrank an actionable one', () => {
     // The findings that were reached are an incomplete picture; calling that a
     // settled list of required changes overstates what the review established.
-    const status = deriveBugReviewStatus(clean, [finding('FALSE_POSITIVE'), finding('NEEDS_MORE_EVIDENCE')], []);
+    const status = deriveBugReviewStatus(clean, [finding('REFUTED'), finding('UNPROVEN')], []);
     expect(status).toBe('INCONCLUSIVE');
   });
 
   it('returns CHANGES_REQUIRED when the reviewer found a bug the candidates missed', () => {
     const status = deriveBugReviewStatus(
       { ...clean, additionalFindings: [{ title: 'cross-tenant read', reason: 'no ownership check', evidence: [] }] },
-      [finding('VERIFIED')],
+      [finding('CONFIRMED')],
       [],
     );
     expect(status).toBe('CHANGES_REQUIRED');
   });
 
   it('never returns PASS while a material disagreement is unresolved', () => {
-    const status = deriveBugReviewStatus({ ...clean, disagreements: [disagreement()] }, [finding('VERIFIED')], []);
+    const status = deriveBugReviewStatus({ ...clean, disagreements: [disagreement()] }, [finding('CONFIRMED')], []);
     expect(status).toBe('CHANGES_REQUIRED');
   });
 });
@@ -173,7 +178,7 @@ describe('severity qualifiers', () => {
   it('defaults a finding to CONFIRMED so silence never reads as provisional', () => {
     const parsed = BugFindingSchema.parse({
       candidateId: 'BUG-1',
-      verdict: 'VERIFIED',
+      verdict: 'CONFIRMED',
       confidence: 'high',
       reason: 'r',
       recommendation: 'keep',

@@ -43,7 +43,7 @@ function modify(overrides: Record<string, unknown> = {}) {
 function bugFinding(overrides: Record<string, unknown> = {}) {
   return BugFindingSchema.parse({
     candidateId: 'BUG-1',
-    verdict: 'VERIFIED',
+    verdict: 'CONFIRMED',
     confidence: 'high',
     reason: 'the handler performs no ownership check',
     recommendation: 'keep the finding',
@@ -306,7 +306,7 @@ describe('Scenario D — a hard test-case ceiling', () => {
 });
 
 describe('bug verdicts carry the same confirmation cost', () => {
-  it('lowers a high-confidence VERIFIED that recorded no contradiction search', () => {
+  it('lowers a high-confidence CONFIRMED that recorded no contradiction search', () => {
     const outcome = gateBugReview({
       findings: [
         bugFinding({
@@ -321,11 +321,13 @@ describe('bug verdicts carry the same confirmation cost', () => {
 
     expect(outcome.findings[0]?.verificationStatus).toBe('PROVISIONAL');
     expect(outcome.findings[0]?.confidence).toBe('medium');
-    expect(outcome.findings[0]?.verdict).toBe('VERIFIED');
-    expect(JSON.stringify(outcome.limitations)).toMatch(/confirmation claim/);
+    expect(outcome.findings[0]?.verdict).toBe('CONFIRMED');
+    // The confidence cap is now derived from evidence coverage rather than
+    // spelled as a special case for one verdict, so it is reported that way.
+    expect(JSON.stringify(outcome.limitations)).toMatch(/confidence was capped from high to medium/);
   });
 
-  it('holds a VERIFIED verdict that traced the path and looked for a guard', () => {
+  it('holds a CONFIRMED verdict that traced the path and looked for a guard', () => {
     const outcome = gateBugReview({
       findings: [
         bugFinding({
