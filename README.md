@@ -488,10 +488,71 @@ Codex never talks to Jira or your database directly. It connects to the
 downstream server's tools, classifies them, and forwards only what passes policy
 — re-checking on every call, not just at discovery.
 
+A connector launches a downstream MCP server, so setting one up is two
+decisions: which server to launch, and how it gets its credentials. Those are
+independent, and the second one has two answers.
+
+### A — a published server, credentials in the connector
+
+For a server you run straight from npm and configure through the environment.
+The `env` block is the whole configuration:
+
 ```yaml
 # ~/.config/codex-mcp/codex-mcp.yaml
 connectors:
-  jira-mcp:
+  jira:
+    enabled: true
+    kind: jira
+    approval: once
+    transport: stdio
+    command: npx
+    args: ['-y', 'your-jira-mcp-server']
+    env:
+      JIRA_BASE_URL: https://your-org.atlassian.net
+      JIRA_EMAIL: you@your-org.com
+      JIRA_API_TOKEN: ${JIRA_API_TOKEN}    # from the .env beside this file
+
+  database:
+    enabled: true
+    kind: database
+    approval: once
+    transport: stdio
+    command: npx
+    args: ['-y', 'your-db-mcp-server']
+    env:
+      DB_DIALECT: mysql
+      DB_HOST: db.internal
+      DB_PORT: '3306'                      # every value must be a string
+      DB_USERNAME: qa_readonly
+      DB_PASSWORD: ${DB_PASSWORD}
+    allowTools: ['execute_query']
+    denyTools: ['update_query']
+    maxRows: 500
+```
+
+`env` is passed through untouched — codex-mcp never reads these keys, so they
+have to match what your server expects. `DB_*` is a common spelling, not a
+schema: a MySQL-specific server that reads `MYSQL_HOST` will ignore `DB_HOST`,
+and one that wants a single DSN wants `DATABASE_URL` instead. Check the server's
+own README first. Splitting the connection into parts is worth it where the
+server supports it — the password stays one isolated `${VAR}` instead of being
+buried in a URL that is awkward to redact and easy to paste somewhere public.
+
+Write the secret as a `${VAR}` reference rather than a literal. It resolves from
+the `.env` beside the config or from the environment, an unset one is reported by
+`doctor` instead of failing at review time, and `${VAR:-fallback}` supplies a
+default. This config file is the one people commit or share; keep it free of
+anything you would not paste into a pull request.
+
+### B — a server you already have, credentials in that project
+
+For an MCP server checked out locally and already working with your editor.
+Point at its entrypoint, set `cwd`, and **omit `env` entirely** — servers of this
+shape load their own `.env` on startup:
+
+```yaml
+connectors:
+  jira:
     enabled: true
     kind: jira
     approval: once
@@ -499,8 +560,9 @@ connectors:
     command: node
     args: ['/path/to/jira-mcp/src/index.js']
     cwd: /path/to/jira-mcp
+    denyTools: ['create_jira_ticket', 'update_jira_ticket']
 
-  db-mcp:
+  database:
     enabled: true
     kind: database
     approval: once
@@ -509,10 +571,22 @@ connectors:
     args: ['/path/to/db-mcp/dist/index.js']
     cwd: /path/to/db-mcp
     allowTools: ['execute_query']
-    denyTools: ['update_query']
     maxRows: 500
     timeoutMs: 10000
 ```
+
+Prefer B when you have the choice. No credential enters codex-mcp's config at
+all, and the server keeps one set of credentials whether codex-mcp drives it or
+your editor does — rotate the token in one place and both follow.
+
+Check how the server finds its `.env` before relying on this. One that resolves
+against its own file (`resolve(__dirname, '../.env')`) works regardless of `cwd`;
+one that reads the *working directory* needs `cwd` set to its project root, which
+is the case worth setting `cwd` for even when it looks redundant.
+
+If the database server can reach more than one database, point the connector at
+the narrowest one. The reviewer picks its own connection per call, so a server
+that can see production is one prompt away from querying it.
 
 `kind` drives normalization onto a stable vocabulary — `requirement.read`,
 `database.query_readonly`, `testmanagement.search`, `external_file.read` — so the
@@ -528,15 +602,20 @@ An unreachable connector **degrades the review to a recorded limitation** rather
 than failing it. Missing evidence is a fact about the review, and the response
 says so.
 
-Run `codex-mcp doctor` after adding one. Each connector line reports how many
-tools were exposed and how many were withheld by policy:
+Run `codex-mcp doctor` after adding one. Each connector line is labelled with the
+key you gave it, and reports how many tools were exposed and how many were
+withheld by policy:
 
 ```text
-[  ok  ] Connector: jira-mcp
-           4 read-only tool(s) exposed, 0 withheld by policy.
-[  ok  ] Connector: db-mcp
+[  ok  ] Connector: jira
+           3 read-only tool(s) exposed, 2 withheld by policy.
+[  ok  ] Connector: database
            6 read-only tool(s) exposed, 1 withheld by policy.
 ```
+
+The withheld counts are the `denyTools` from the samples above — the two Jira
+writes and `update_query`. A count higher than your `denyTools` list means the
+classifier withheld something on its own; `codex_capabilities` names which.
 
 ### Asking permission — the `approval` field
 

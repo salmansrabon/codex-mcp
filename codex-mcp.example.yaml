@@ -69,6 +69,26 @@ logging:
 # these directly — codex-mcp discovers their tools, classifies risk, and exposes
 # only what passes policy. Credentials here are likely committed; prefer letting
 # each connector read its own.
+#
+# Every connector below launches a downstream MCP server. There are two ways to
+# give that server its credentials, and they are chosen per connector:
+#
+#   A. Credentials here.  For a published server you run via npx, or any server
+#      that expects its config from the environment. Fill in the `env` block;
+#      the child inherits ONLY PATH, HOME, and what you declare there.
+#
+#   B. Credentials over there.  For an MCP server you already have checked out
+#      and working. Point `command`/`args` at its entrypoint, set `cwd`, and
+#      OMIT `env` entirely -- most such servers load their own .env on startup.
+#      Nothing secret enters this file, and the server keeps one set of
+#      credentials whether you drive it or your editor does.
+#
+# B is the better default when you have the server locally. Each connector shows
+# A as the live block and B commented out beneath it; swap whichever you need.
+#
+# Never put credentials in this file if you can avoid it, and never commit them.
+# Use a ${...} reference to pull a value in from the .env beside this file.
+
 connectors:
   jira:
     # Off until you point it at a real server.
@@ -83,6 +103,7 @@ connectors:
     # stdio (launch a command) | http (call a url).
     transport: stdio
 
+    # --- A. Published server, credentials here ---------------------------
     # Executable to launch.
     command: npx
 
@@ -93,16 +114,27 @@ connectors:
     cwd: /path/to/your-jira-mcp
 
     # The child inherits ONLY PATH, HOME, and what is declared here.
+    # A ${...} reference reads from the .env beside this file, so no token
+    # is stored here.
     env:
       JIRA_BASE_URL: https://your-org.atlassian.net
       JIRA_EMAIL: you@your-org.com
-      JIRA_API_TOKEN: ''
+      JIRA_API_TOKEN: ${JIRA_API_TOKEN}
+
+    # --- B. Local server project, credentials over there -----------------
+    # Replaces command/args/cwd/env above. The server loads its own .env, so
+    # this connector holds no secret at all.
+    #
+    # command: node
+    # args: ['/path/to/jira-mcp/src/index.js']
+    # cwd: /path/to/jira-mcp
 
     # Tools to expose even if policy would withhold them; empty means policy decides.
     allowTools: []
 
-    # Tools to withhold regardless of policy.
-    denyTools: []
+    # Tools to withhold regardless of policy. The classifier already rules out
+    # writes; naming the ones your server exposes is a second lock on that door.
+    denyTools: ['create_jira_ticket', 'update_jira_ticket']
 
     # How long the server may take to start, in milliseconds.
     startupTimeoutMs: 30000
@@ -115,17 +147,41 @@ connectors:
     kind: database
     approval: once
     transport: stdio
+    # --- A. Published server, credentials here ---------------------------
     command: npx
     args: ['-y', 'your-db-mcp-server']
 
     # Use a READ-ONLY account: the grant is the boundary that does not depend on this server being correct.
+    # A ${...} reference reads from the .env beside this file, so no password
+    # is stored here.
+    #
+    # These names are passed through untouched — codex-mcp never reads them.
+    # Match whatever your server expects; DB_* below is only a common spelling,
+    # and a MySQL-specific server wanting MYSQL_HOST will ignore DB_HOST.
+    # Every value must be a string, so quote the port.
     env:
-      DATABASE_URL: postgres://readonly_user:password@db.internal:5432/appdb
+      DB_DIALECT: mysql
+      DB_HOST: db.internal
+      DB_PORT: '3306'
+      DB_USERNAME: qa_readonly
+      DB_PASSWORD: ${DB_PASSWORD}
+
+    # --- B. Local server project, credentials over there -----------------
+    # Replaces command/args/env above. The server loads its own .env.
+    #
+    # command: node
+    # args: ['/path/to/db-mcp/dist/index.js']
+    # cwd: /path/to/db-mcp
+    #
+    # If that server can reach more than one database, point this at the
+    # narrowest one. The reviewer picks its own connection per call, so a
+    # server that can see production is one prompt away from querying it.
 
     # Not a default. A generic SQL executor is withheld because its name says nothing about what a caller may pass it; allowlisting is safe, every statement still goes through the read-only SQL policy.
     allowTools: ['execute_query']
 
-    # Not a default.
+    # Not a default. Name any mutating tool your server exposes; policy would
+    # withhold it anyway, but the list documents the boundary.
     denyTools: ['update_query']
 
     # Rows returned per query, injected as a cap.
