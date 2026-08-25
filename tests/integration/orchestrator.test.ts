@@ -95,7 +95,7 @@ function makeOrchestrator(overrides: Partial<Config> = {}, env: NodeJS.ProcessEn
   return new ReviewOrchestrator({ config: merged, logger: silentLogger, authManager, runner });
 }
 
-function invocations(): { argv: string[]; prompt: string; cwd: string }[] {
+function invocations(): { argv: string[]; prompt: string; cwd: string; outputSchema?: unknown }[] {
   if (!existsSync(logPath)) return [];
   return readFileSync(logPath, 'utf8')
     .split('\n')
@@ -437,21 +437,66 @@ describe('bug review end to end', () => {
   });
 });
 
+describe('structured output', () => {
+  it('constrains Codex with a schema file instead of hoping the prompt is obeyed', async () => {
+    await makeOrchestrator().qualify({
+      reviewType: 'test-design',
+      project: { root: fixture.root },
+      candidate: { testCases: CANDIDATE_TEST_CASES },
+    });
+
+    const [run] = invocations();
+    expect(run?.argv).toContain('--output-schema');
+    expect(run?.outputSchema).toBeTruthy();
+  });
+
+  it('sends a schema the strict structured-output mode accepts', async () => {
+    await makeOrchestrator().qualify({
+      reviewType: 'test-design',
+      project: { root: fixture.root },
+      candidate: { testCases: CANDIDATE_TEST_CASES },
+    });
+
+    const schema = invocations()[0]?.outputSchema as Record<string, unknown>;
+    const objects: Record<string, unknown>[] = [];
+    const walk = (node: unknown): void => {
+      if (Array.isArray(node)) return node.forEach(walk);
+      if (typeof node !== 'object' || node === null) return;
+      objects.push(node as Record<string, unknown>);
+      Object.values(node as Record<string, unknown>).forEach(walk);
+    };
+    walk(schema);
+
+    for (const node of objects) {
+      if (!node.properties || typeof node.properties !== 'object') continue;
+      expect(node.additionalProperties).toBe(false);
+      expect(new Set(node.required as string[])).toEqual(
+        new Set(Object.keys(node.properties as Record<string, unknown>)),
+      );
+    }
+    // Keywords the API rejects outright must not survive into the file.
+    for (const node of objects) expect(node).not.toHaveProperty('default');
+  });
+});
+
 describe('combined review', () => {
   it('runs both reviews and reports the worst status', async () => {
     const testResponse = join(fixture.configDir, 'test-response.json');
     writeFileSync(testResponse, JSON.stringify(TEST_REVIEW_RESPONSE));
 
-    // The fake CLI serves one canned response per run, so alternate per call.
-    let call = 0;
+    const bugResponse = join(fixture.configDir, 'bug-response.json');
+    writeFileSync(bugResponse, JSON.stringify(BUG_REVIEW_RESPONSE));
+
+    // The fake CLI serves one canned response per run. The two runs of a
+    // combined review are concurrent, so the response is chosen from the prompt
+    // rather than from call order.
     const merged = { ...config };
     const runner = new CodexRunner({
       config: merged,
       logger: silentLogger,
       spawn: async (args, input) => {
         const { runProcess } = await import('../../src/codex/process-runner.js');
-        const which = call++ === 0 ? testResponse : responsePath;
-        writeFileSync(responsePath, JSON.stringify(BUG_REVIEW_RESPONSE));
+        const which = input.prompt.includes('independent test-design qualification') ? testResponse : bugResponse;
         return runProcess({
           command: process.execPath,
           args: [FAKE_CODEX, ...args],
@@ -479,5 +524,51 @@ describe('combined review', () => {
     expect(result.bugs).toBeDefined();
     expect(result.status).toBe('CHANGES_REQUIRED');
     expect(invocations()).toHaveLength(2);
+  });
+
+  it('runs the two reviews concurrently rather than end to end', async () => {
+    const testResponse = join(fixture.configDir, 'test-response.json');
+    writeFileSync(testResponse, JSON.stringify(TEST_REVIEW_RESPONSE));
+    const bugResponse = join(fixture.configDir, 'bug-response.json');
+    writeFileSync(bugResponse, JSON.stringify(BUG_REVIEW_RESPONSE));
+
+    const spans: { start: number; end: number }[] = [];
+    const merged = { ...config };
+    const runner = new CodexRunner({
+      config: merged,
+      logger: silentLogger,
+      spawn: async (args, input) => {
+        const { runProcess } = await import('../../src/codex/process-runner.js');
+        const start = Date.now();
+        const which = input.prompt.includes('independent test-design qualification') ? testResponse : bugResponse;
+        const result = await runProcess({
+          command: process.execPath,
+          args: [FAKE_CODEX, ...args],
+          cwd: input.cwd,
+          stdin: input.prompt,
+          timeoutMs: input.timeoutMs,
+          env: { ...process.env, FAKE_CODEX_LOG: logPath, FAKE_CODEX_RESPONSE: which, FAKE_CODEX_DELAY_MS: '300' },
+        });
+        spans.push({ start, end: Date.now() });
+        return result;
+      },
+    });
+
+    await new ReviewOrchestrator({
+      config: merged,
+      logger: silentLogger,
+      authManager: new AuthManager({ codexBinary: merged.codexBinary }),
+      runner,
+    }).qualify({
+      reviewType: 'combined',
+      project: { root: fixture.root },
+      candidate: { testCases: CANDIDATE_TEST_CASES, bugs: CANDIDATE_BUGS },
+    });
+
+    expect(spans).toHaveLength(2);
+    const [first, second] = spans as [{ start: number; end: number }, { start: number; end: number }];
+    // Sequential runs cannot overlap; concurrent ones must.
+    const overlap = Math.min(first.end, second.end) - Math.max(first.start, second.start);
+    expect(overlap).toBeGreaterThan(0);
   });
 });

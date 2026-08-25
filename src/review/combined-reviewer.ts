@@ -17,7 +17,7 @@ export interface CombinedReviewInput {
   logger: Logger;
   broker?: BrokerLaunchSpec;
   timeoutMs: number;
-  /** Depth-scaled effort; both passes of a combined review share it. */
+  /** Depth-scaled effort; both runs of a combined review share it. */
   reasoningEffort?: string;
   signal?: AbortSignal;
 }
@@ -39,8 +39,17 @@ export interface CombinedReviewOutput {
  * this claim true". Fusing them measurably degrades both, and separate runs also
  * mean a schema failure in one does not discard the other.
  *
- * They run sequentially: concurrent Codex processes in the same project root
- * contend for the same sandbox and inflate wall-clock more than they save.
+ * They run concurrently. Nothing is shared between them — separate processes,
+ * separate prompts, separate temp directories, and a read-only sandbox that
+ * takes no lock — so the two reviews are byte-for-byte what they would have
+ * been in sequence, and wall-clock becomes the slower of the two rather than
+ * the sum. What concurrency does cost is real but is not quality: both runs
+ * bill tokens at once, and the second no longer gets a warm prefix cache from
+ * the first.
+ *
+ * Both are awaited even when one fails, so a rejection cannot leave the other
+ * Codex process running unattended. The first failure is then rethrown, which
+ * keeps the existing contract that a review is returned whole or not at all.
  */
 export async function reviewCombined(input: CombinedReviewInput): Promise<CombinedReviewOutput> {
   let repairAttempts = 0;
@@ -51,17 +60,28 @@ export async function reviewCombined(input: CombinedReviewInput): Promise<Combin
   let testDesign: TestReviewResult | undefined;
   let bugs: BugReviewResult | undefined;
 
-  if (input.testCases.length > 0) {
-    const outcome = await reviewTestDesign({
-      context: input.context,
-      candidates: input.testCases,
-      runner: input.runner,
-      logger: input.logger,
-      ...(input.broker ? { broker: input.broker } : {}),
-      timeoutMs: input.timeoutMs,
-      ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
-      ...(input.signal ? { signal: input.signal } : {}),
-    });
+  const shared = {
+    context: input.context,
+    runner: input.runner,
+    logger: input.logger,
+    ...(input.broker ? { broker: input.broker } : {}),
+    timeoutMs: input.timeoutMs,
+    ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
+    ...(input.signal ? { signal: input.signal } : {}),
+  };
+
+  const [testOutcome, bugOutcome] = await Promise.allSettled([
+    input.testCases.length > 0 ? reviewTestDesign({ ...shared, candidates: input.testCases }) : Promise.resolve(undefined),
+    input.bugs.length > 0 ? reviewBugs({ ...shared, candidates: input.bugs }) : Promise.resolve(undefined),
+  ]);
+
+  // Report the first failure, but only once both processes have settled.
+  for (const settled of [testOutcome, bugOutcome]) {
+    if (settled.status === 'rejected') throw settled.reason;
+  }
+
+  if (testOutcome.status === 'fulfilled' && testOutcome.value) {
+    const outcome = testOutcome.value;
     testDesign = outcome.result;
     repairAttempts += outcome.repairAttempts;
     attemptedCommands.push(...outcome.attemptedCommands);
@@ -72,17 +92,8 @@ export async function reviewCombined(input: CombinedReviewInput): Promise<Combin
     }
   }
 
-  if (input.bugs.length > 0) {
-    const outcome = await reviewBugs({
-      context: input.context,
-      candidates: input.bugs,
-      runner: input.runner,
-      logger: input.logger,
-      ...(input.broker ? { broker: input.broker } : {}),
-      timeoutMs: input.timeoutMs,
-      ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
-      ...(input.signal ? { signal: input.signal } : {}),
-    });
+  if (bugOutcome.status === 'fulfilled' && bugOutcome.value) {
+    const outcome = bugOutcome.value;
     bugs = outcome.result;
     repairAttempts += outcome.repairAttempts;
     attemptedCommands.push(...outcome.attemptedCommands);

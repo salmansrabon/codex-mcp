@@ -3,6 +3,7 @@ import { zodToJsonSchema } from 'zod-to-json-schema';
 
 import type { CodexRunner, CodexRunResult } from '../codex/codex-runner.js';
 import type { BrokerLaunchSpec } from '../codex/command-builder.js';
+import { stripNulls, toStrictJsonSchema } from '../codex/output-schema.js';
 import { CodexMcpError } from '../errors/codex-mcp-error.js';
 import { ErrorCodes } from '../errors/codes.js';
 import type { Logger } from '../util/logger.js';
@@ -30,18 +31,27 @@ export interface StructuredReviewOutcome<T> {
 /**
  * Run Codex and insist on schema-valid structured output (PLAN.md §20).
  *
- * Exactly one repair attempt: the retry tells Codex precisely which fields were
- * wrong and forbids re-running the analysis. If that also fails we raise
+ * The schema is enforced twice, at different costs. Codex receives a strict
+ * copy through `--output-schema`, which constrains decoding, so most drift
+ * never happens; the prompt still carries a readable copy because the field
+ * descriptions are reviewer guidance, not just validation.
+ *
+ * Exactly one repair attempt remains behind that: the retry tells Codex
+ * precisely which fields were wrong and forbids re-running the analysis. A
+ * repair is a whole second Codex run at full cost, which is why it is worth
+ * preventing rather than merely handling. If it also fails we raise
  * `CODEX_OUTPUT_INVALID` — a fabricated or partially-parsed review is worse than
  * an honest error, because the authoring agent would act on it.
  */
 export async function runStructuredReview<T>(request: StructuredReviewRequest<T>): Promise<StructuredReviewOutcome<T>> {
-  const jsonSchema = toJsonSchema(request.schema, request.schemaName);
+  const jsonSchema = toJsonSchema(request.schema);
+  const outputSchema = toStrictJsonSchema(jsonSchema);
   const promptWithSchema = `${request.prompt}\n\n${renderSchemaSection(request.schemaName, jsonSchema)}`;
 
   const first = await request.runner.run({
     prompt: promptWithSchema,
     projectRoot: request.projectRoot,
+    outputSchema,
     ...(request.broker ? { broker: request.broker } : {}),
     timeoutMs: request.timeoutMs,
     ...(request.reasoningEffort ? { reasoningEffort: request.reasoningEffort } : {}),
@@ -68,6 +78,7 @@ export async function runStructuredReview<T>(request: StructuredReviewRequest<T>
   const second = await request.runner.run({
     prompt: repairPrompt,
     projectRoot: request.projectRoot,
+    outputSchema,
     ...(request.broker ? { broker: request.broker } : {}),
     timeoutMs: request.timeoutMs,
     ...(request.reasoningEffort ? { reasoningEffort: request.reasoningEffort } : {}),
@@ -93,7 +104,10 @@ function validate<T>(schema: z.ZodType<T, z.ZodTypeDef, unknown>, run: CodexRunR
   if (run.json === undefined) {
     return { ok: false, problem: 'No JSON object could be extracted from the final message.' };
   }
-  const parsed = schema.safeParse(run.json);
+  // `--output-schema` makes every field required, so a reviewer with nothing to
+  // say writes `null`. The Zod schema spells that as absent, where its optional
+  // and default handling lives — so the nulls come back out before validation.
+  const parsed = schema.safeParse(stripNulls(run.json));
   if (parsed.success) return { ok: true, value: parsed.data };
   const problem = parsed.error.issues
     .slice(0, 12)
@@ -102,17 +116,24 @@ function validate<T>(schema: z.ZodType<T, z.ZodTypeDef, unknown>, run: CodexRunR
   return { ok: false, problem };
 }
 
-function toJsonSchema(schema: z.ZodType<unknown, z.ZodTypeDef, unknown>, name: string): unknown {
-  return zodToJsonSchema(schema, { name, $refStrategy: 'none' });
+/**
+ * Inlined rather than `$ref`-ed, and unnamed rather than wrapped in
+ * `definitions`, because the same object is handed to Codex as an output schema
+ * and the strict structured-output mode wants one self-contained schema.
+ */
+function toJsonSchema(schema: z.ZodType<unknown, z.ZodTypeDef, unknown>): unknown {
+  return zodToJsonSchema(schema, { $refStrategy: 'none' });
 }
 
 function renderSchemaSection(name: string, jsonSchema: unknown): string {
   return `## Required output schema (${name})
 
-Your entire response must be one JSON object valid against this schema.
+Your entire response must be one JSON object valid against this schema. Where
+you have nothing to say for an optional field, write \`null\` rather than
+inventing a value.
 
 \`\`\`json
-${JSON.stringify(jsonSchema, null, 2)}
+${JSON.stringify(jsonSchema)}
 \`\`\``;
 }
 

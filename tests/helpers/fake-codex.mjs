@@ -56,7 +56,18 @@ if (argv[0] !== 'exec') {
 const prompt = await readStdin();
 
 if (logPath) {
-  appendFileSync(logPath, `${JSON.stringify({ argv, prompt, cwd: process.cwd() })}\n`);
+  // The real CLI reads `--output-schema` before it calls the model, and the
+  // temp file is gone by the time a test could look at it, so record it here.
+  let outputSchema;
+  const schemaPath = valueAfter('--output-schema');
+  if (schemaPath) {
+    try {
+      outputSchema = JSON.parse(readFileSync(schemaPath, 'utf8'));
+    } catch {
+      outputSchema = null;
+    }
+  }
+  appendFileSync(logPath, `${JSON.stringify({ argv, prompt, cwd: process.cwd(), outputSchema })}\n`);
 }
 
 if (mode === 'model-too-old') {

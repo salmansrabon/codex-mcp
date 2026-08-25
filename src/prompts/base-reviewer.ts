@@ -470,7 +470,29 @@ Derive the change set from the code itself.`;
   if (git.recentCommits?.length) lines.push('', 'Recent commits:', ...git.recentCommits.map((c) => `  ${c}`));
   if (git.notes.length) lines.push('', ...git.notes.map((note) => `Note: ${note}`));
 
-  lines.push('', 'Read the actual diff yourself with `git diff`; the file list above is only a pointer.');
+  if (git.diffBody) {
+    lines.push(
+      '',
+      'The diff itself follows. It was read for you by codex-mcp with `git diff`,',
+      'so it is the same bytes you would fetch yourself — but a diff shows only what',
+      'changed, never what the changed code reaches or what reaches it. Read the',
+      'surrounding files for anything you intend to claim.',
+      '',
+      '```diff',
+      git.diffBody.trimEnd(),
+      '```',
+    );
+    if (git.diffOmittedFiles?.length) {
+      lines.push(
+        '',
+        `These files changed but their hunks did not fit the embedded diff. Read them with \`git diff\` before judging anything that depends on them (${git.diffOmittedFiles.length}):`,
+        ...git.diffOmittedFiles.map((file) => `  ${file}`),
+      );
+    }
+  } else {
+    lines.push('', 'No diff body was captured. Read the diff yourself with `git diff`; the file list above is only a pointer.');
+  }
+
   return lines.join('\n');
 }
 
