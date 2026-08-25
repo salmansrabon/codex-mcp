@@ -11,6 +11,7 @@ import {
 } from '../schemas/risk-discovery-result.js';
 import type { Logger } from '../util/logger.js';
 import { runStructuredReview } from './structured-review.js';
+import type { ReviewPlan } from './review-depth.js';
 import { gateRiskDiscovery, type EvidenceCoverage } from './verification-gate.js';
 
 /**
@@ -31,6 +32,8 @@ export interface RiskDiscoveryInput {
   reasoningEffort?: string;
   signal?: AbortSignal;
   coverage?: EvidenceCoverage;
+  /** Which obligations this pass carries. A MEDIUM change is not asked for a coverage map it has no blast radius for. */
+  plan?: ReviewPlan;
 }
 
 export interface RiskDiscoveryOutput {
@@ -41,7 +44,7 @@ export interface RiskDiscoveryOutput {
 }
 
 export async function reviewRiskDiscovery(input: RiskDiscoveryInput): Promise<RiskDiscoveryOutput> {
-  const prompt = buildRiskDiscoveryPrompt(input.context);
+  const prompt = buildRiskDiscoveryPrompt(input.context, input.plan);
 
   const outcome = await runStructuredReview({
     prompt,
@@ -60,6 +63,7 @@ export async function reviewRiskDiscovery(input: RiskDiscoveryInput): Promise<Ri
     result: normalizeRiskDiscovery(outcome.result, {
       blastRadiusSupplied: input.context.artifacts.blastRadius.present,
       ...(input.coverage ? { coverage: input.coverage } : {}),
+      ...(input.plan ? { plan: input.plan } : {}),
     }),
     repairAttempts: outcome.repairAttempts,
     attemptedCommands: outcome.run.attemptedCommands,
@@ -69,13 +73,17 @@ export async function reviewRiskDiscovery(input: RiskDiscoveryInput): Promise<Ri
 
 export function normalizeRiskDiscovery(
   result: RiskDiscoveryResult,
-  options: { blastRadiusSupplied: boolean; coverage?: EvidenceCoverage },
+  options: { blastRadiusSupplied: boolean; coverage?: EvidenceCoverage; plan?: ReviewPlan },
 ): RiskDiscoveryResult {
   const gated = gateRiskDiscovery({
     findings: result.findings,
     blockerSweep: result.blockerSweep,
     coverageMap: result.coverageMap,
     blastRadiusSupplied: options.blastRadiusSupplied,
+    // A pass that was never asked for the sweep is not reported as having
+    // skipped it. Reporting an obligation nobody imposed is noise that reads
+    // exactly like a real gap.
+    sweepRequired: options.plan?.blockerSweep ?? true,
     ...(options.coverage ? { coverage: options.coverage } : {}),
   });
 

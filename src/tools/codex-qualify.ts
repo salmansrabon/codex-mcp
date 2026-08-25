@@ -1,5 +1,6 @@
 import { zodToJsonSchema } from 'zod-to-json-schema';
 
+import { toCompactResult } from '../review/compact-result.js';
 import type { ReviewOrchestrator } from '../review/review-orchestrator.js';
 import { QualifyRequestSchema } from '../schemas/qualify-request.js';
 
@@ -55,6 +56,18 @@ Two more things come back that you did not ask for:
 \`meta.evidence.scope.complete: false\` means the review is scope-limited: a repository this change
 depends on could not be read, every confidence is capped, and the unreadable roots are named.
 
+**The default result is decision-shaped, not exhaustive.** You get \`mustChange\`, \`missing\`,
+\`verdicts\`, \`investigate\`, \`optional\`, and the limitations that change what you should do.
+Every traced path, contradiction search, confidence dimension, and citation check was computed and
+applied before that view was produced — pass \`options.view: "full"\` to receive them verbatim when
+you are auditing the review itself rather than acting on it.
+
+**How much review runs is decided from the change, not by the reviewer.** A small, low-risk change
+gets the candidate audit alone; a change touching auth, persistence, migrations, shared code, or
+several packages additionally gets the candidate-blind discovery pass, the release-blocker sweep, and
+the blast-radius coverage map. \`meta.pathsRun\` says which actually ran. Override with
+\`options.independentDiscovery\` if you need to.
+
 Required: reviewType, project.root, and a matching candidate set. Everything else — task context,
 blast-radius, test-charter, connectors — is optional and never blocks a review.`;
 
@@ -74,5 +87,19 @@ export async function handleCodexQualify(
   args: unknown,
   signal?: AbortSignal,
 ): Promise<unknown> {
-  return orchestrator.qualify(args, signal);
+  const result = await orchestrator.qualify(args, signal);
+
+  // Projection happens here, at the tool boundary, and never inside the
+  // orchestrator: the full result is what memory, logging, and every gate
+  // operate on, and what `view: "full"` returns unchanged.
+  const view = readView(args);
+  return view === 'full' ? result : toCompactResult(result);
+}
+
+/** The requested view, read defensively — the request has not been validated at this point. */
+function readView(args: unknown): 'compact' | 'full' {
+  if (typeof args !== 'object' || args === null) return 'compact';
+  const options = (args as { options?: unknown }).options;
+  if (typeof options !== 'object' || options === null) return 'compact';
+  return (options as { view?: unknown }).view === 'full' ? 'full' : 'compact';
 }

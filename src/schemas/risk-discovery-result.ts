@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import {
+  BehaviorAssertionShape,
   BlockerSweepEntrySchema,
   CoverageNodeSchema,
   EvidenceSchema,
@@ -49,6 +50,7 @@ export const RiskFindingSchema = z.object({
     .boolean()
     .default(false)
     .describe('True only if shipping the change as it stands would cause this failure in production.'),
+  ...BehaviorAssertionShape,
   ...SeverityQualifierShape,
   ...VerificationShape,
   ...ObjectionShape,

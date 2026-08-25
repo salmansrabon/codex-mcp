@@ -24,6 +24,89 @@ export interface DepthAssessment {
   signals: string[];
   /** Never above the configured effort: this lowers cost, it does not raise ambition. */
   reasoningEffort: ReasoningEffort;
+  /** Which review paths this change is worth running. */
+  plan: ReviewPlan;
+  /**
+   * What the plan decided, for the result meta.
+   *
+   * Kept out of `signals` on purpose: `signals` is rendered into the reviewer's
+   * prompt, and telling an audit run that no second pass will look for what it
+   * misses is an invitation to overreach. The caller should know; the reviewer
+   * should not.
+   */
+  planNotes: string[];
+}
+
+/**
+ * Which parts of the review actually run.
+ *
+ * Depth used to move one dial — reasoning effort — while every change paid for
+ * every path. A copy tweak was getting a candidate-blind risk-discovery run
+ * with a six-class release-blocker sweep and a blast-radius coverage map, and
+ * the usual result was an INCONCLUSIVE discovery pass with no findings: a
+ * second full Codex run spent to learn nothing, on a change where there was
+ * nothing to learn.
+ *
+ * The plan is computed from the same mechanical signals as the depth, for the
+ * same reason: a reviewer asked whether it deserves a deep review says yes.
+ * It is a floor as well as a ceiling — every path stays on for HIGH, and the
+ * one case that resolves to HIGH by default is an unresolvable change set,
+ * where cheap is dangerous.
+ */
+export interface ReviewPlan {
+  /** Run the candidate-blind risk-discovery pass. A second Codex process. */
+  independentDiscovery: boolean;
+  /** Require the six-class release-blocker sweep from that pass. */
+  blockerSweep: boolean;
+  /** Require the blast radius to come back as an inspected-or-not coverage map. */
+  coverageMap: boolean;
+  /** Retrieve project rules, and how widely. */
+  ruleRetrieval: 'off' | 'targeted' | 'full';
+  /** Discover and admit repositories outside the project root. */
+  multiRoot: boolean;
+}
+
+/**
+ * What each depth is worth running.
+ *
+ * SMALL keeps the audit and drops everything speculative: the caller asked
+ * about specific candidates, and on a four-file change with no risk markers the
+ * discovery pass reliably finds nothing. MEDIUM buys discovery back but not the
+ * full ceremony around it. HIGH runs everything.
+ */
+const PLANS: Record<ReviewDepth, ReviewPlan> = {
+  SMALL: {
+    independentDiscovery: false,
+    blockerSweep: false,
+    coverageMap: false,
+    // Rules are cheap and are the one thing that can make a small change wrong,
+    // so retrieval survives even here — just narrowly.
+    ruleRetrieval: 'targeted',
+    multiRoot: false,
+  },
+  MEDIUM: {
+    independentDiscovery: true,
+    blockerSweep: true,
+    coverageMap: false,
+    ruleRetrieval: 'targeted',
+    multiRoot: true,
+  },
+  HIGH: {
+    independentDiscovery: true,
+    blockerSweep: true,
+    coverageMap: true,
+    ruleRetrieval: 'full',
+    multiRoot: true,
+  },
+};
+
+/** The plan for a depth, with the coverage map switched on whenever a blast radius exists to check against. */
+export function planFor(depth: ReviewDepth, options: { blastRadiusSupplied: boolean } = { blastRadiusSupplied: false }): ReviewPlan {
+  const plan = PLANS[depth];
+  // A supplied blast radius is a list of places this change reaches. Having one
+  // and not checking it is the failure the coverage map exists to prevent, at
+  // any depth.
+  return options.blastRadiusSupplied ? { ...plan, coverageMap: true, independentDiscovery: true } : plan;
 }
 
 /**
@@ -82,7 +165,7 @@ export function assessReviewDepth(input: DepthInput): DepthAssessment {
   // is the most expensive path, not the cheapest.
   if (!input.git.available || changed.length === 0) {
     signals.push('no change set could be resolved, so the affected surface is unknown');
-    return { depth: 'HIGH', signals, reasoningEffort: input.configuredEffort };
+    return finish('HIGH', signals, input, input.configuredEffort);
   }
 
   signals.push(`${changed.length} changed file${changed.length === 1 ? '' : 's'}`);
@@ -116,7 +199,7 @@ export function assessReviewDepth(input: DepthInput): DepthAssessment {
     input.narrowedScope ||
     (risks.length >= 1 && changed.length > SMALL_MAX_FILES);
 
-  if (heavy) return { depth: 'HIGH', signals, reasoningEffort: input.configuredEffort };
+  if (heavy) return finish('HIGH', signals, input, input.configuredEffort);
 
   const moderate =
     risks.length >= 1 ||
@@ -126,10 +209,26 @@ export function assessReviewDepth(input: DepthInput): DepthAssessment {
     input.artifacts.testCharter.present ||
     input.candidateCount > 12;
 
-  if (moderate) return { depth: 'MEDIUM', signals, reasoningEffort: input.configuredEffort };
+  if (moderate) return finish('MEDIUM', signals, input, input.configuredEffort);
 
   signals.push('no risk-class markers, single area, small diff');
-  return { depth: 'SMALL', signals, reasoningEffort: lowerEffort(input.configuredEffort) };
+  return finish('SMALL', signals, input, lowerEffort(input.configuredEffort));
+}
+
+function finish(
+  depth: ReviewDepth,
+  signals: string[],
+  input: DepthInput,
+  reasoningEffort: ReasoningEffort,
+): DepthAssessment {
+  const plan = planFor(depth, { blastRadiusSupplied: input.artifacts.blastRadius.present });
+  const planNotes = [
+    plan.independentDiscovery
+      ? 'independent risk discovery ran: the change set is broad or risky enough to be worth a candidate-blind pass'
+      : 'independent risk discovery skipped: nothing in this change set is worth a second candidate-blind pass',
+  ];
+  if (!plan.multiRoot) planNotes.push('cross-repository discovery skipped at this depth');
+  return { depth, signals, reasoningEffort, plan, planNotes };
 }
 
 /**

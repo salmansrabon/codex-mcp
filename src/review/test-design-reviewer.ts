@@ -7,7 +7,8 @@ import type { Limitation } from '../schemas/review-common.js';
 import { TestReviewResultSchema, type TestReviewResult } from '../schemas/test-review-result.js';
 import type { Logger } from '../util/logger.js';
 import { runStructuredReview } from './structured-review.js';
-import { gateTestReview } from './verification-gate.js';
+import { gateDisagreements, gateTestReview, type AuthorityContext } from './verification-gate.js';
+import { authorityContextFrom } from './authority-context.js';
 
 export interface TestDesignReviewInput {
   context: PromptContext;
@@ -123,6 +124,11 @@ export function normalizeTestReview(
   });
   limitations.push(...gated.limitations);
 
+  // Source authority is settled on the disagreements, where a blocking claim
+  // about "what the requirement says" actually lands.
+  const authority = gateDisagreements(result.disagreements, authorityContextFrom(context));
+  limitations.push(...authority.limitations);
+
   const summary = {
     accepted: accepted.length,
     modify: gated.modify.length,
@@ -132,7 +138,8 @@ export function normalizeTestReview(
 
   return {
     ...result,
-    status: deriveTestReviewStatus(result, gated, limitations),
+    status: deriveTestReviewStatus({ ...result, disagreements: authority.disagreements }, gated, limitations),
+    disagreements: authority.disagreements,
     accepted,
     modify: gated.modify,
     remove: gated.remove,

@@ -10,6 +10,7 @@ import type { RiskDiscoveryResult } from '../schemas/risk-discovery-result.js';
 import { reviewBugs } from './bug-reviewer.js';
 import { reviewRiskDiscovery } from './risk-discovery-reviewer.js';
 import { reviewTestDesign } from './test-design-reviewer.js';
+import type { ReviewPlan } from './review-depth.js';
 import type { EvidenceCoverage } from './verification-gate.js';
 import type { CitationCheck } from '../schemas/review-common.js';
 
@@ -30,6 +31,8 @@ export interface CombinedReviewInput {
   citationChecks?: readonly CitationCheck[];
   /** Run the unanchored discovery pass. Off makes the review audit-only. */
   independentDiscovery: boolean;
+  /** Which obligations the discovery pass carries, from the depth plan. */
+  plan?: ReviewPlan;
 }
 
 export interface CombinedReviewOutput {
@@ -94,7 +97,11 @@ export async function reviewCombined(input: CombinedReviewInput): Promise<Combin
       : Promise.resolve(undefined),
     // The third path runs from the same evidence and never sees the candidates.
     input.independentDiscovery
-      ? reviewRiskDiscovery({ ...shared, ...(input.coverage ? { coverage: input.coverage } : {}) })
+      ? reviewRiskDiscovery({
+          ...shared,
+          ...(input.coverage ? { coverage: input.coverage } : {}),
+          ...(input.plan ? { plan: input.plan } : {}),
+        })
       : Promise.resolve(undefined),
   ]);
 

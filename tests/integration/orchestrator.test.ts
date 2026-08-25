@@ -311,8 +311,11 @@ describe('test-design review end to end', () => {
       expect(invocation.prompt).toMatch(/the code is not\s+automatically right/);
       expect(invocation.prompt).toContain('the requirement stands, and the');
       expect(invocation.prompt).toContain('explicit unresolved conflict');
-      // One statement, not one per review type.
-      expect(invocation.prompt.match(/authoritative requirement — accepted specification/g)?.length).toBe(1);
+      // One statement, not one per review type. The ordering is now the tail of
+      // an explicit four-question resolution rather than a bare ranking, so the
+      // marker moved; the invariant it guards did not.
+      expect(invocation.prompt.match(/a stated acceptance criterion, or other normative requirement text/g)?.length).toBe(1);
+      expect(invocation.prompt.match(/Work out which source decides, before deciding/g)?.length).toBe(1);
     }
   });
 

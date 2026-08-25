@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import {
+  BehaviorAssertionShape,
   DisagreementSchema,
   EvidenceSchema,
   LimitationSchema,
@@ -20,6 +21,7 @@ export const ModifyEntrySchema = z.object({
   evidence: z.array(EvidenceSchema).default([]),
   recommendation: z.string().min(1),
   severity: PrioritySchema.optional(),
+  ...BehaviorAssertionShape,
   ...SeverityQualifierShape,
   ...VerificationShape,
   ...ObjectionShape,
@@ -85,6 +87,7 @@ export const MissingEntrySchema = z.object({
     .array(DisplacementSchema)
     .default([])
     .describe('Under a hard case ceiling, what this addition should replace. Required when the additions exceed the ceiling.'),
+  ...BehaviorAssertionShape,
   ...SeverityQualifierShape,
   ...VerificationShape,
   ...ObjectionShape,

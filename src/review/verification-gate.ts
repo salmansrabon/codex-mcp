@@ -1,7 +1,13 @@
 import type { CandidateTestCase } from '../schemas/qualify-request.js';
 import type { BugFinding, BugReviewResult, BugVerdict } from '../schemas/bug-review-result.js';
-import { RELEASE_BLOCKER_CLASSES } from '../schemas/review-common.js';
-import type { Confidence, Limitation, VerificationStatus } from '../schemas/review-common.js';
+import { DECISIVE_SOURCES, GROUNDING_BASES, RELEASE_BLOCKER_CLASSES } from '../schemas/review-common.js';
+import type {
+  AuthorityResolution,
+  BehaviorBasis,
+  Confidence,
+  Limitation,
+  VerificationStatus,
+} from '../schemas/review-common.js';
 import type { RiskDiscoveryResult } from '../schemas/risk-discovery-result.js';
 import type { MissingEntry, ModifyEntry, RemoveEntry, TestReviewResult } from '../schemas/test-review-result.js';
 
@@ -175,6 +181,190 @@ function adjustmentLimitation(area: string, adjustments: readonly GateAdjustment
   };
 }
 
+/**
+ * An entry that tells the author how the system should behave.
+ *
+ * `suggestedAssertion` is the field that turns a review into a test
+ * specification, so it counts as an assertion whether or not the reviewer
+ * filled in `assertedBehavior`.
+ */
+interface BehaviorAsserting {
+  assertedBehavior?: string;
+  behaviorBasis: BehaviorBasis;
+  behaviorEvidence: { source: string; location: string; note?: string }[];
+  suggestedAssertion?: string;
+  objectionPriority: 'MUST_FIX' | 'SHOULD_FIX' | 'OPTIONAL';
+  verificationStatus: VerificationStatus;
+  reason: string;
+}
+
+/**
+ * Refuse to let a plausible-sounding behavior become required work.
+ *
+ * The failure: "assert the phone number is safely prefilled", proposed as a
+ * MUST_FIX for a form with no prefill behavior in the requirement, the rules,
+ * or the code. It was well-written, it was the kind of thing such a form often
+ * does, and it was invented.
+ *
+ * The entry is demoted, never dropped. A reviewer noticing that nothing
+ * establishes a behavior everyone assumes is sometimes exactly right — that is
+ * a question worth asking, and it is precisely not a defect to fix. So it lands
+ * as an OPTIONAL investigation with the uncertainty stated in the text the
+ * author reads, rather than as a test they are told to write.
+ */
+function assertionBlocker(entry: BehaviorAsserting): string | undefined {
+  const asserts = Boolean(entry.assertedBehavior?.trim() || entry.suggestedAssertion?.trim());
+  if (!asserts) return undefined;
+
+  if (!GROUNDING_BASES.includes(entry.behaviorBasis)) {
+    return 'nothing was named that establishes this behavior — no acceptance criterion, project rule, contract, implementation, or run';
+  }
+  if (entry.behaviorEvidence.length === 0) {
+    return `it claims a basis of "${entry.behaviorBasis}" but cites nothing for it`;
+  }
+  return undefined;
+}
+
+function gateAssertion<T extends BehaviorAsserting>(entry: T, subject: string, adjustments: GateAdjustment[]): T {
+  const blocker = assertionBlocker(entry);
+  if (!blocker) return entry;
+
+  const wasBlocking = entry.objectionPriority !== 'OPTIONAL';
+  if (!wasBlocking && entry.verificationStatus === 'HYPOTHESIS') return entry;
+
+  adjustments.push({
+    subject,
+    detail: `an asserted behavior was demoted to a non-blocking investigation because ${blocker}.`,
+  });
+
+  return {
+    ...entry,
+    objectionPriority: 'OPTIONAL' as const,
+    verificationStatus: 'HYPOTHESIS' as const,
+    // Stated in the field the author actually reads, not only in a limitation
+    // they may never open.
+    reason: `[UNPROVEN — ${blocker}] ${entry.reason}`,
+  };
+}
+
+/** One limitation covering every ungrounded assertion this pass demoted. */
+function assertionLimitation(adjustments: readonly GateAdjustment[]): Limitation | undefined {
+  if (adjustments.length === 0) return undefined;
+  return {
+    area: 'unsupported-assertion',
+    detail: adjustments.map((adjustment) => `${adjustment.subject}: ${adjustment.detail}`).join(' '),
+    impact:
+      'These state behavior nothing in the evidence establishes. They may still be worth asking about — but as questions, not as required test expectations.',
+    material: false,
+    affects: [...new Set(adjustments.map((adjustment) => adjustment.subject))],
+  };
+}
+
+/**
+ * Whether a disagreement has named a source that can actually settle it.
+ *
+ * The failure: ticket prose read as settled specification. "The ticket says X,
+ * the code does Y, therefore the test must expect X" is only valid when the
+ * ticket text is normative, and a great deal of ticket text is an example.
+ *
+ * Ticket prose and model inference are not on `DECISIVE_SOURCES`. Neither is an
+ * inferred acceptance criterion, which is handled by the caller passing
+ * `inferredCriterionIds` — the author's own inference is not a requirement
+ * however reasonable it is.
+ */
+function authorityBlocker(
+  disagreement: { authority?: AuthorityResolution; evidence: { location: string }[] },
+  context: { retrievedRules: ReadonlySet<string>; inferredCriterionIds: ReadonlySet<string> },
+): string | undefined {
+  const authority = disagreement.authority;
+
+  if (!authority) {
+    return 'it does not say which source decides it, so it cannot be told apart from a disagreement about ticket wording';
+  }
+
+  if (authority.precedenceOverriddenBy && !context.retrievedRules.has(authority.precedenceOverriddenBy)) {
+    // A precedence override naming a rule nobody loaded is an assertion that a
+    // rule exists, which is the one thing a rule may not be.
+    return `it claims project rule "${authority.precedenceOverriddenBy}" changes source precedence, but no such rule was retrieved for this review`;
+  }
+
+  if (!authority.conflictIsReal) {
+    return 'the reviewer itself recorded that the sources are not actually in conflict';
+  }
+
+  if (!DECISIVE_SOURCES.includes(authority.authoritative)) {
+    return authority.authoritative === 'ticket-prose'
+      ? `it rests on ticket prose, which the reviewer classified as ${authority.ticketTextRole}; prose settles nothing unless it is a stated criterion`
+      : `the source it names as authoritative (${authority.authoritative}) cannot settle a specification question on its own`;
+  }
+
+  if (authority.authoritative === 'acceptance-criterion') {
+    const grounding = disagreement.evidence.map((item) => item.location);
+    const inferredOnly =
+      grounding.length > 0 &&
+      grounding.every((location) =>
+        [...context.inferredCriterionIds].some((id) => location.includes(id)),
+      );
+    if (inferredOnly) {
+      return 'every criterion it cites was marked inferred by the author, and an inference is not a requirement';
+    }
+  }
+
+  return undefined;
+}
+
+export interface AuthorityContext {
+  /** Paths of the rule documents actually retrieved, so an invented rule cannot rearrange precedence. */
+  retrievedRules: ReadonlySet<string>;
+  /** Ids of acceptance criteria the author marked inferred. */
+  inferredCriterionIds: ReadonlySet<string>;
+}
+
+export const EMPTY_AUTHORITY_CONTEXT: AuthorityContext = {
+  retrievedRules: new Set(),
+  inferredCriterionIds: new Set(),
+};
+
+/**
+ * Demote disagreements that cannot name a decisive source.
+ *
+ * Demoted, not removed: `material: false` keeps the dispute visible and stops
+ * it blocking acceptance. The author still sees that the reviewer read the
+ * ticket differently; they are no longer told it is a defect.
+ */
+export function gateDisagreements<T extends { topic: string; material: boolean; authority?: AuthorityResolution; evidence: { location: string }[] }>(
+  disagreements: readonly T[],
+  context: AuthorityContext,
+): { disagreements: T[]; limitations: Limitation[] } {
+  const adjustments: GateAdjustment[] = [];
+
+  const gated = disagreements.map((disagreement) => {
+    if (!disagreement.material) return disagreement;
+    const blocker = authorityBlocker(disagreement, context);
+    if (!blocker) return disagreement;
+
+    adjustments.push({
+      subject: disagreement.topic,
+      detail: `was made non-blocking because ${blocker}.`,
+    });
+    return { ...disagreement, material: false };
+  });
+
+  const limitations: Limitation[] = [];
+  if (adjustments.length > 0) {
+    limitations.push({
+      area: 'source-authority',
+      detail: adjustments.map((adjustment) => `${adjustment.subject}: ${adjustment.detail}`).join(' '),
+      impact:
+        'These disputes are recorded but do not block. Settle them by finding what actually decides the question — a stated criterion, a project rule, an architecture decision, or a verified contract.',
+      material: false,
+      affects: [...new Set(adjustments.map((adjustment) => adjustment.subject))],
+    });
+  }
+
+  return { disagreements: gated, limitations };
+}
+
 export interface TestGateOutcome {
   modify: ModifyEntry[];
   remove: RemoveEntry[];
@@ -202,11 +392,18 @@ export function gateTestReview(input: TestGateInput): TestGateOutcome {
   const confirmation: GateAdjustment[] = [];
   const value: GateAdjustment[] = [];
 
-  const modify = input.modify.map((entry) => gateEntry(entry, entry.candidateId, confirmation));
+  const assertions: GateAdjustment[] = [];
+
+  const modify = input.modify.map((entry) =>
+    gateAssertion(gateEntry(entry, entry.candidateId, confirmation), entry.candidateId, assertions),
+  );
   const remove = input.remove.map((entry) => gateEntry(entry, entry.candidateId, confirmation));
 
   const missing = input.missing.map((entry) => {
-    let gated = gateEntry(entry, entry.title, confirmation);
+    // Grounding runs before the value threshold: an invented behavior has no
+    // unique risk to name either, and the honest reason for demoting it is that
+    // nothing establishes it, not that it duplicates coverage.
+    let gated = gateAssertion(gateEntry(entry, entry.title, confirmation), entry.title, assertions);
 
     // The value threshold. An addition that cannot name a risk nothing else
     // covers is a coverage count, and a reviewer optimizing for finding count
@@ -238,6 +435,8 @@ export function gateTestReview(input: TestGateInput): TestGateOutcome {
   const limitations: Limitation[] = [];
   const confirmationNote = adjustmentLimitation('verification-discipline', confirmation);
   if (confirmationNote) limitations.push(confirmationNote);
+  const assertionNote = assertionLimitation(assertions);
+  if (assertionNote) limitations.push(assertionNote);
   const valueNote = adjustmentLimitation('objection-value', value);
   if (valueNote) limitations.push(valueNote);
 
@@ -511,6 +710,8 @@ export interface RiskGateInput {
   coverage?: EvidenceCoverage;
   /** True when a blast-radius artifact was supplied, which is what makes an unvisited node a real gap. */
   blastRadiusSupplied: boolean;
+  /** False when the depth plan did not ask for the sweep, so its absence is not a gap. */
+  sweepRequired?: boolean;
 }
 
 /**
@@ -535,8 +736,10 @@ export function gateRiskDiscovery(input: RiskGateInput): RiskGateOutcome {
   const confidenceCaps: GateAdjustment[] = [];
   const limitations: Limitation[] = [];
 
+  const assertions: GateAdjustment[] = [];
+
   const findings = input.findings.map((finding) => {
-    let gated = gateEntry(finding, finding.title, adjustments);
+    let gated = gateAssertion(gateEntry(finding, finding.title, adjustments), finding.title, assertions);
 
     if (!coverage.scopeComplete && gated.impactConfidence === 'high') {
       confidenceCaps.push({
@@ -560,8 +763,9 @@ export function gateRiskDiscovery(input: RiskGateInput): RiskGateOutcome {
     return gated;
   });
 
+  const sweepRequired = input.sweepRequired ?? true;
   const answered = new Set(input.blockerSweep.map((entry) => entry.blockerClass));
-  const unanswered = RELEASE_BLOCKER_CLASSES.filter((blockerClass) => !answered.has(blockerClass));
+  const unanswered = sweepRequired ? RELEASE_BLOCKER_CLASSES.filter((blockerClass) => !answered.has(blockerClass)) : [];
   const notInspected = input.blockerSweep.filter((entry) => entry.applicable && entry.outcome === 'not-inspected');
 
   if (unanswered.length > 0 || notInspected.length > 0) {
@@ -618,6 +822,8 @@ export function gateRiskDiscovery(input: RiskGateInput): RiskGateOutcome {
 
   const note = adjustmentLimitation('verification-discipline', adjustments);
   if (note) limitations.push(note);
+  const assertionNote = assertionLimitation(assertions);
+  if (assertionNote) limitations.push(assertionNote);
   const capNote = adjustmentLimitation('confidence-calibration', confidenceCaps);
   if (capNote) limitations.push(capNote);
 

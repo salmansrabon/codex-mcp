@@ -110,7 +110,32 @@ export const QualifyRequestSchema = z
         source: z.string().optional().describe('Where the requirement lives: jira, github, confluence, inline, ...'),
         title: z.string().optional(),
         description: z.string().optional(),
-        acceptanceCriteria: z.array(z.string()).optional(),
+        /**
+         * Acceptance criteria, each optionally marked as inferred.
+         *
+         * A plain string is treated as explicit, which is what every existing
+         * caller means. The object form exists because an author who honestly
+         * writes "(inferred)" beside a criterion was being *objected to* for it
+         * — the reviewer read the label as a claim to be a requirement. Marking
+         * provenance as data removes the ambiguity, and the gate then refuses
+         * to let an inferred criterion ground a blocking demand: the author's
+         * own inference is not a requirement, however reasonable.
+         */
+        acceptanceCriteria: z
+          .array(
+            z.union([
+              z.string(),
+              z.object({
+                text: z.string().min(1),
+                provenance: z
+                  .enum(['explicit', 'inferred'])
+                  .default('explicit')
+                  .describe('explicit: stated in the requirement source. inferred: you derived it and are saying so.'),
+                source: z.string().optional().describe('Where an explicit criterion came from, e.g. "DEV-2982#AC2".'),
+              }),
+            ]),
+          )
+          .optional(),
         links: z.array(z.string()).optional(),
       })
       .optional(),
@@ -196,6 +221,18 @@ export const QualifyRequestSchema = z
          * will look for what the candidate set missed.
          */
         independentDiscovery: z.boolean().optional(),
+        /**
+         * How much of the result to return.
+         *
+         * `compact` (the default) is decision-shaped: what to change, what is
+         * missing, what is still open, and the limitations that affect any of
+         * those. `full` returns the complete review — every traced path,
+         * contradiction search, confidence dimension, and citation check.
+         *
+         * Both are produced from the same gated object; compact drops nothing a
+         * decision depends on. Ask for `full` when auditing the review itself.
+         */
+        view: z.enum(['compact', 'full']).optional(),
         /**
          * Let the review read repositories discovered outside `project.root`.
          * Defaults to on; turning it off does not hide them, it reports them as

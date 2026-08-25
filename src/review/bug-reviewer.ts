@@ -13,8 +13,9 @@ import type { Limitation } from '../schemas/review-common.js';
 import type { Logger } from '../util/logger.js';
 import type { CitationCheck } from '../schemas/review-common.js';
 import { BROKEN_CITATION_STATUSES } from '../schemas/review-common.js';
+import { authorityContextFrom } from './authority-context.js';
 import { runStructuredReview } from './structured-review.js';
-import { gateBugReview, FULL_COVERAGE, type EvidenceCoverage } from './verification-gate.js';
+import { gateBugReview, gateDisagreements, FULL_COVERAGE, type EvidenceCoverage } from './verification-gate.js';
 
 export interface BugReviewInput {
   context: PromptContext;
@@ -75,7 +76,7 @@ export async function reviewBugs(input: BugReviewInput): Promise<BugReviewOutput
 export function normalizeBugReview(
   result: BugReviewResult,
   candidates: readonly CandidateBug[],
-  context: Pick<PromptContext, 'requirement' | 'external' | 'database' | 'scopeNotice'>,
+  context: Pick<PromptContext, 'requirement' | 'external' | 'database' | 'scopeNotice' | 'rules'>,
   evidence: { coverage?: EvidenceCoverage; citationChecks?: readonly CitationCheck[] } = {},
 ): BugReviewResult {
   const coverage = evidence.coverage ?? FULL_COVERAGE;
@@ -192,6 +193,9 @@ export function normalizeBugReview(
   const gated = gateBugReview({ findings, additionalFindings: result.additionalFindings, coverage });
   limitations.push(...gated.limitations);
 
+  const authority = gateDisagreements(result.disagreements, authorityContextFrom(context));
+  limitations.push(...authority.limitations);
+
   const count = (verdict: string): number => gated.findings.filter((finding) => finding.verdict === verdict).length;
   const summary = {
     confirmed: count('CONFIRMED'),
@@ -207,7 +211,12 @@ export function normalizeBugReview(
 
   return {
     ...result,
-    status: deriveBugReviewStatus({ ...result, additionalFindings: gated.additionalFindings }, gated.findings, limitations),
+    status: deriveBugReviewStatus(
+      { ...result, additionalFindings: gated.additionalFindings, disagreements: authority.disagreements },
+      gated.findings,
+      limitations,
+    ),
+    disagreements: authority.disagreements,
     findings: gated.findings,
     additionalFindings: gated.additionalFindings,
     summary,

@@ -237,6 +237,144 @@ export const LimitationSchema = z.object({
 });
 export type Limitation = z.infer<typeof LimitationSchema>;
 
+/**
+ * What grounds a statement about how the system is supposed to behave.
+ *
+ * The failure this exists for: a reviewer proposed "assert the phone number is
+ * safely prefilled" for a form that has no prefill behavior anywhere — not in
+ * the requirement, not in a rule, not in the code. It was plausible, it read
+ * like a competent test expectation, and it was fiction. Nothing in the
+ * pipeline could tell it apart from a grounded one, because both are prose with
+ * an `evidence` array attached, and the evidence for the invented one pointed
+ * at the file where the field is *defined*.
+ *
+ * So the basis is asked for separately from the evidence. "Which file did you
+ * look at" and "what establishes that the system should do this" are different
+ * questions, and only the second one can be answered `none`.
+ */
+export const BehaviorBasisSchema = z.enum([
+  'acceptance-criterion',
+  'project-rule',
+  'contract',
+  'implementation',
+  'runtime',
+  'none',
+]);
+export type BehaviorBasis = z.infer<typeof BehaviorBasisSchema>;
+
+/** Bases that establish intended behavior. `implementation` is included: what the code does is a fact about behavior. */
+export const GROUNDING_BASES: readonly BehaviorBasis[] = [
+  'acceptance-criterion',
+  'project-rule',
+  'contract',
+  'implementation',
+  'runtime',
+];
+
+/**
+ * Carried by every entry that tells the author the system should behave a
+ * particular way.
+ *
+ * The default is `none`, so an entry that says nothing about its basis is
+ * treated as having none — the same direction every other default in this
+ * schema points. An ungrounded assertion is not deleted; it is demoted to a
+ * non-blocking investigation, because "nobody has established this" and "this
+ * is wrong" are different claims and the reviewer may well be onto something.
+ */
+export const BehaviorAssertionShape = {
+  assertedBehavior: z
+    .string()
+    .optional()
+    .describe(
+      'The behavior you are stating the system should have, if this entry states one. ' +
+        'Leave empty when the entry only reports what the code does today.',
+    ),
+  behaviorBasis: BehaviorBasisSchema.default('none').describe(
+    'What establishes the asserted behavior. `none` is the honest answer when it seemed reasonable but nothing states it — ' +
+      'codex-mcp then demotes the entry to a non-blocking investigation rather than dropping it.',
+  ),
+  behaviorEvidence: z
+    .array(EvidenceSchema)
+    .default([])
+    .describe('The specific criterion, rule clause, contract, code, or run that establishes the asserted behavior.'),
+} as const;
+
+/**
+ * Which source actually decides a disagreement, worked out rather than assumed.
+ *
+ * The failure this exists for: a reviewer read ticket prose as settled
+ * specification and demanded the tests match it, when the prose was an
+ * illustrative example and a project rule defined the real behavior. The old
+ * hierarchy hard-coded "authoritative requirement" at the top and left the
+ * reviewer to decide what counted as one, which in practice meant whatever the
+ * ticket said.
+ *
+ * Nothing here ranks sources by itself. It records the reasoning, so the gate
+ * can refuse to let a disagreement block on a source the reviewer itself
+ * described as illustrative.
+ */
+export const AuthoritativeSourceSchema = z.enum([
+  'acceptance-criterion',
+  'project-rule',
+  'architecture-decision',
+  'domain-contract',
+  'runtime-evidence',
+  'implementation',
+  'ticket-prose',
+  'model-inference',
+  'undetermined',
+]);
+export type AuthoritativeSource = z.infer<typeof AuthoritativeSourceSchema>;
+
+/**
+ * Sources that can settle a disagreement on their own.
+ *
+ * Ticket prose is absent deliberately, and so is model inference. Ticket text
+ * becomes decisive only by being an acceptance criterion — that is what makes
+ * it normative rather than descriptive.
+ */
+export const DECISIVE_SOURCES: readonly AuthoritativeSource[] = [
+  'acceptance-criterion',
+  'project-rule',
+  'architecture-decision',
+  'domain-contract',
+  'runtime-evidence',
+];
+
+export const AuthorityResolutionSchema = z.object({
+  sourcesAvailable: z
+    .array(AuthoritativeSourceSchema)
+    .default([])
+    .describe('Every source you actually had for this specific question.'),
+  authoritative: AuthoritativeSourceSchema.default('undetermined').describe(
+    'Which one decides this disagreement. `undetermined` when you cannot tell, which is a real answer.',
+  ),
+  reason: z.string().min(1).describe('Why that source decides it, in one sentence.'),
+  ticketTextRole: z
+    .enum(['normative', 'illustrative', 'unclear', 'not-applicable'])
+    .default('unclear')
+    .describe(
+      'Whether the ticket wording is a requirement or an example. "The user enters e.g. +8801700000000" is illustrative; ' +
+        'an acceptance criterion is normative.',
+    ),
+  conflictIsReal: z
+    .boolean()
+    .default(false)
+    .describe('False when the two sources are answering different questions and only look like they disagree.'),
+  /**
+   * A project rule that changes the default source ordering.
+   *
+   * Checked against the rules actually retrieved for this review: a precedence
+   * override naming a rule that was never loaded is dropped, so the ordering
+   * cannot be rearranged by asserting a rule exists.
+   */
+  precedenceOverriddenBy: z
+    .string()
+    .optional()
+    .describe('Path of the project rule that changes the default source ordering, exactly as it was given to you.'),
+});
+export type AuthorityResolution = z.infer<typeof AuthorityResolutionSchema>;
+
 /** A point where the reviewer and the authoring agent genuinely disagree. */
 export const DisagreementSchema = z.object({
   candidateId: z.string().optional(),
@@ -245,6 +383,15 @@ export const DisagreementSchema = z.object({
   reviewerPosition: z.string().min(1),
   evidence: z.array(EvidenceSchema).default([]),
   resolutionHint: z.string().optional(),
+  /**
+   * Which source decides this, worked out before the disagreement is raised.
+   *
+   * Optional in the schema and required in practice for a *blocking*
+   * disagreement: the gate demotes one that cannot name a decisive source, so
+   * a dispute grounded only in ticket prose or in the reviewer's own reading
+   * becomes something to look at rather than something to fix.
+   */
+  authority: AuthorityResolutionSchema.optional(),
   /**
    * Defaults to true, the opposite of `Limitation.material`: the reviewer is
    * told to raise material findings only, so a disagreement it bothered to

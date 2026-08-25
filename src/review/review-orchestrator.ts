@@ -236,6 +236,35 @@ export class ReviewOrchestrator {
         });
       }
 
+      // Depth is decided from the change set before any of the expensive paths
+      // are chosen, so the reviewer receives a budget rather than choosing one.
+      // A model asked how hard to think answers "hard", which is how a budget
+      // becomes advisory.
+      const depth = assessReviewDepth({
+        git,
+        artifacts,
+        candidateCount: testCases.length + bugs.length,
+        connectors: external.evidence.usable,
+        narrowedScope: Boolean(scopeNotice),
+        configuredEffort: this.config.reasoningEffort,
+      });
+
+      // The caller may force a path on or off; the plan decides otherwise.
+      const plan = {
+        ...depth.plan,
+        ...(request.options?.independentDiscovery !== undefined
+          ? { independentDiscovery: request.options.independentDiscovery }
+          : {}),
+        ...(request.options?.expandScope === false ? { multiRoot: false } : {}),
+      };
+      logger.info('review depth assessed', {
+        depth: depth.depth,
+        reasoningEffort: depth.reasoningEffort,
+        independentDiscovery: plan.independentDiscovery,
+        ruleRetrieval: plan.ruleRetrieval,
+        multiRoot: plan.multiRoot,
+      });
+
       // Access is decided separately from discovery: `scope.additionalRoots` is
       // what widens the reviewer's boundary, and `scope.unreachableRoots` is
       // what caps its confidence and lands in `limitations` by name.
@@ -243,7 +272,7 @@ export class ReviewOrchestrator {
         projectRoot,
         workspaceRoot: this.config.sources.cwd,
         related,
-        allowExpansion: request.options?.expandScope ?? true,
+        allowExpansion: plan.multiRoot,
       });
       if (scope.additionalRoots.length > 0 || scope.unreachableRoots.length > 0) {
         logger.info('review scope resolved across repositories', {
@@ -261,7 +290,7 @@ export class ReviewOrchestrator {
           ...bugs.map((bug) => `${bug.title} ${bug.component ?? ''}`),
           request.task?.title ?? '',
           request.task?.description ?? '',
-          ...(request.task?.acceptanceCriteria ?? []),
+          ...(request.task?.acceptanceCriteria ?? []).map((entry) => (typeof entry === 'string' ? entry : entry.text)),
           request.options?.focus ?? '',
         ].filter(Boolean),
       });
@@ -289,19 +318,6 @@ export class ReviewOrchestrator {
             : []),
         ],
       };
-
-      // Depth is decided from the change set before the prompt exists, so the
-      // reviewer receives a budget rather than choosing one. A model asked how
-      // hard to think answers "hard", which is how a budget becomes advisory.
-      const depth = assessReviewDepth({
-        git,
-        artifacts,
-        candidateCount: testCases.length + bugs.length,
-        connectors: external.evidence.usable,
-        narrowedScope: Boolean(scopeNotice),
-        configuredEffort: this.config.reasoningEffort,
-      });
-      logger.info('review depth assessed', { depth: depth.depth, reasoningEffort: depth.reasoningEffort });
 
       const context: PromptContext = {
         projectRoot,
@@ -340,16 +356,29 @@ export class ReviewOrchestrator {
         reasoningEffort: depth.reasoningEffort,
         coverage,
         citationChecks: citations.checks,
-        // The unanchored pass is on by default. Its whole value is answering
-        // "what did the author miss", which the audit path structurally cannot.
-        independentDiscovery: request.options?.independentDiscovery ?? true,
+        // Whether the unanchored pass runs at all is a depth decision now: on a
+        // small, low-risk change it reliably returns nothing, and it costs a
+        // second full Codex run to do it.
+        independentDiscovery: plan.independentDiscovery,
+        plan,
         ...(signal ? { signal } : {}),
       });
 
       const statuses: ReviewStatus[] = [];
       if (outcome.testDesign) statuses.push(outcome.testDesign.status);
       if (outcome.bugs) statuses.push(outcome.bugs.status);
-      if (outcome.riskDiscovery) statuses.push(outcome.riskDiscovery.status);
+
+      // A discovery pass that found nothing and hit no material gap has told
+      // the author nothing they must act on. Letting its INCONCLUSIVE outrank a
+      // clean audit was turning "I looked and there was nothing" into "this
+      // review could not be completed" — the same conflation the verdict
+      // taxonomy exists to prevent, one level up.
+      const discoverySaidSomething =
+        outcome.riskDiscovery !== undefined &&
+        (outcome.riskDiscovery.findings.length > 0 ||
+          outcome.riskDiscovery.limitations.some((limitation) => limitation.material) ||
+          outcome.riskDiscovery.status === 'ERROR');
+      if (outcome.riskDiscovery && discoverySaidSomething) statuses.push(outcome.riskDiscovery.status);
 
       // Comparison happens here, after both paths finished, and never inside
       // either prompt: a discovery run told what the author already has stops
@@ -386,7 +415,7 @@ export class ReviewOrchestrator {
           reasoningEffort: depth.reasoningEffort,
           sandbox: this.config.sandbox,
           depth: depth.depth,
-          depthSignals: depth.signals,
+          depthSignals: [...depth.signals, ...depth.planNotes],
           pass,
           maxPasses: this.config.maxPasses,
           furtherPassesAllowed: pass < this.config.maxPasses,

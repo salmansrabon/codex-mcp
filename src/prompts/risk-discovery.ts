@@ -1,3 +1,4 @@
+import type { ReviewPlan } from '../review/review-depth.js';
 import { RELEASE_BLOCKER_CLASSES } from '../schemas/review-common.js';
 import { buildBasePrompt, OUTPUT_RULES, type PromptContext } from './base-reviewer.js';
 
@@ -18,10 +19,43 @@ import { buildBasePrompt, OUTPUT_RULES, type PromptContext } from './base-review
  * and found nothing.
  */
 
-export function buildRiskDiscoveryPrompt(context: PromptContext): string {
-  return [buildBasePrompt(context), renderTask(), renderBlockerSweep(), renderCoverageMap(context), renderOutputContract(), OUTPUT_RULES].join(
-    '\n\n',
-  );
+export function buildRiskDiscoveryPrompt(context: PromptContext, plan?: ReviewPlan): string {
+  const wantsSweep = plan?.blockerSweep ?? true;
+  const wantsCoverageMap = plan?.coverageMap ?? true;
+
+  return [
+    buildBasePrompt(context),
+    renderTask(),
+    wantsSweep ? renderBlockerSweep() : renderTargetedSweep(),
+    wantsCoverageMap || context.artifacts.blastRadius.present ? renderCoverageMap(context) : '',
+    renderOutputContract(),
+    OUTPUT_RULES,
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+}
+
+/**
+ * The short form of the sweep, for a change that did not earn the long one.
+ *
+ * Still asks the two questions, because those are the point; drops the
+ * obligation to file six structured entries about classes the change cannot
+ * reach. A sweep nobody needed produces six paragraphs of "not applicable",
+ * which costs tokens and teaches the reader to skim the section that matters.
+ */
+function renderTargetedSweep(): string {
+  return `## Before you finish, ask twice
+
+> What could make this feature unreleasable?
+>
+> What high-impact failure might the author have completely missed?
+
+This change was assessed as low-risk from its own shape — few files, no
+security, persistence, migration, or shared-code paths — so you are not asked
+for the full per-class blocker sweep. If either question turns up something
+real, file it in \`findings\` with \`releaseBlocking\` set and say which class
+it belongs to. If the assessment looks wrong to you from inside the code, say so
+in \`limitations\`: the classification is mechanical and it can be wrong.`;
 }
 
 function renderTask(): string {
