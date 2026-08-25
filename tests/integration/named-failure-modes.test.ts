@@ -392,7 +392,7 @@ describe('F6 — a finding the project had already ruled on', () => {
     });
 
     const prompt = prompts().find((entry) => entry.includes('independent test-design qualification')) ?? '';
-    expect(prompt).toContain('.claude/rules/tenant-scoping.md');
+    expect(prompt).toContain(join('.claude', 'rules', 'tenant-scoping.md'));
     expect(prompt).toContain('must filter by tenant id at the repository layer');
     expect(prompt).toMatch(/Treat an\s+applicable rule as source of truth/);
     expect(result.meta.evidence.projectRules?.applied).toContain(join('.claude', 'rules', 'tenant-scoping.md'));
@@ -412,7 +412,7 @@ describe('F6 — a finding the project had already ruled on', () => {
 
     const prompt = prompts().find((entry) => entry.includes('independent test-design qualification')) ?? '';
     expect(prompt).toContain('Further rule documents found and not loaded');
-    expect(prompt).toContain('.claude/rules/billing.md');
+    expect(prompt).toContain(join('.claude', 'rules', 'billing.md'));
   });
 });
 

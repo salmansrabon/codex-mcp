@@ -10,6 +10,7 @@ import { planInit, runInit } from '../src/init.js';
 import { CodexMcpError, toCodexMcpError } from '../src/errors/codex-mcp-error.js';
 import { BrokerServer } from '../src/mcp-broker/broker-server.js';
 import { CodexMcpServer } from '../src/server.js';
+import { AskConversation } from '../src/tools/ask-conversation.js';
 import { handleCodexAsk } from '../src/tools/codex-ask.js';
 import { Logger, rootLogger } from '../src/util/logger.js';
 
@@ -254,7 +255,10 @@ async function commandAsk(
   const consent = new AutoConsentGate(true, 'Consent given by running `codex-mcp ask` in a terminal.');
 
   const result = await handleCodexAsk(
-    { runner, config, logger, auth: authManager, consent },
+    // A fresh conversation per command: this process exits when the answer is
+    // printed, so there is no session for a transcript to belong to. Memory is
+    // an MCP-surface feature by construction, not by flag.
+    { runner, config, logger, auth: authManager, consent, conversation: new AskConversation() },
     { question },
   );
 

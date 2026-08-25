@@ -1,6 +1,8 @@
 import { readFile, stat } from 'node:fs/promises';
 import { isAbsolute, relative, resolve } from 'node:path';
 
+import { isInside } from '../util/fs.js';
+
 import type { CandidateBug } from '../schemas/qualify-request.js';
 import {
   BROKEN_CITATION_STATUSES,
@@ -105,14 +107,19 @@ export function parseCitation(raw: string): ParsedCitation | undefined {
 async function resolveCited(path: string, scope: CitationScope): Promise<{ absolute: string; root: string } | 'out-of-scope' | undefined> {
   if (isAbsolute(path)) {
     const absolute = resolve(path);
-    const root = scope.roots.find((candidate) => !relative(candidate, absolute).startsWith('..'));
+    // `isInside` (not a `relative().startsWith('..')` check) is what actually
+    // catches a path that escaped onto a different filesystem root: on
+    // Windows, `relative()` between two drives returns the absolute target
+    // rather than a `..`-prefixed one, so a bare prefix check would silently
+    // accept a citation on the wrong drive as "inside".
+    const root = scope.roots.find((candidate) => isInside(candidate, absolute));
     if (!root) return 'out-of-scope';
     return (await isFile(absolute)) ? { absolute, root } : undefined;
   }
 
   for (const root of scope.roots) {
     const absolute = resolve(root, path);
-    if (relative(root, absolute).startsWith('..')) continue;
+    if (!isInside(root, absolute)) continue;
     if (await isFile(absolute)) return { absolute, root };
   }
   return undefined;

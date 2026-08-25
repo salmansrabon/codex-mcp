@@ -9,6 +9,7 @@ import { ErrorCodes } from '../errors/codes.js';
 import { describeAccess, type ConsentGate } from '../policy/consent.js';
 import { buildBrokerLaunchSpec } from '../review/broker-launcher.js';
 import type { Logger } from '../util/logger.js';
+import type { AskConversation } from './ask-conversation.js';
 
 export const CODEX_ASK_TOOL_NAME = 'codex_ask';
 
@@ -38,6 +39,11 @@ export const CODEX_ASK_INPUT_SCHEMA = {
       minLength: 1,
       description: 'The question to answer. No repository context is supplied.',
     },
+    reset: {
+      type: 'boolean',
+      description:
+        'Forget the conversation so far and start a new thread. Use when changing subject; a stale transcript otherwise colours every later answer.',
+    },
   },
   required: ['question'],
   additionalProperties: false,
@@ -64,10 +70,17 @@ export interface AskDeps {
    * The CLI supplies a self-consenting gate: typing the command IS the request.
    */
   consent: ConsentGate;
+  /**
+   * Running transcript. The MCP server owns one per session, so questions
+   * asked there build on each other; the CLI passes a fresh one per command,
+   * so a terminal invocation is always a standalone question.
+   */
+  conversation: AskConversation;
 }
 
 export interface AskRequest {
   question: string;
+  reset?: boolean;
 }
 
 export interface AskResult {
@@ -76,6 +89,8 @@ export interface AskResult {
   connectorsUsed: string[];
   /** Connectors that were configured but withheld, and why. */
   limitations: string[];
+  /** Exchanges now held, this one included. 1 means nothing preceded it. */
+  turn: number;
   durationMs: number;
 }
 
@@ -87,7 +102,8 @@ function parseRequest(args: unknown): AskRequest {
       '`question` is required and must be a non-empty string.',
     );
   }
-  return { question: question.trim() };
+  const reset = (args as AskRequest | undefined)?.reset;
+  return { question: question.trim(), ...(reset === true ? { reset: true } : {}) };
 }
 
 /** Ask about each configured connector, keeping only the ones consent allows. */
@@ -127,8 +143,13 @@ async function gatherConsent(
 export async function handleCodexAsk(deps: AskDeps, args: unknown): Promise<AskResult> {
   const request = parseRequest(args);
 
-  // Fail before spending a spawn, matching the review path's behaviour.
+  // Fail before spending a spawn, matching the review path's behaviour. This
+  // is also why nothing is recorded until the call succeeds: a rejected
+  // question never reached the model, so it is not part of the conversation.
   await deps.auth.requireAuthenticated();
+
+  if (request.reset) deps.conversation.reset();
+  const transcript = deps.conversation.transcript();
 
   const askId = `ask_${Date.now().toString(36)}`;
   const { granted, limitations } = await gatherConsent(
@@ -146,16 +167,20 @@ export async function handleCodexAsk(deps: AskDeps, args: unknown): Promise<AskR
     });
 
     const result = await deps.runner.run({
-      prompt: buildPrompt(request.question, granted),
+      prompt: buildPrompt(request.question, granted, transcript),
       projectRoot: scratch,
       timeoutMs: ASK_TIMEOUT_MS,
       ...(broker ? { broker } : {}),
     });
 
+    const answer = result.finalMessage?.trim() ?? '';
+    deps.conversation.record(request.question, answer);
+
     return {
-      answer: result.finalMessage?.trim() ?? '',
+      answer,
       connectorsUsed: granted.map((c) => c.name),
       limitations,
+      turn: deps.conversation.turns,
       durationMs: result.durationMs,
     };
   } finally {
@@ -163,7 +188,11 @@ export async function handleCodexAsk(deps: AskDeps, args: unknown): Promise<AskR
   }
 }
 
-function buildPrompt(question: string, connectors: readonly ConnectorConfig[]): string {
+function buildPrompt(
+  question: string,
+  connectors: readonly ConnectorConfig[],
+  transcript: string,
+): string {
   const lines = [
     'Answer the question below directly and concisely.',
     '',
@@ -185,6 +214,18 @@ function buildPrompt(question: string, connectors: readonly ConnectorConfig[]): 
       '',
       'You have no ticket tracker or database access. If the question is about a specific ticket or',
       'dataset, say plainly that you cannot see it.',
+    );
+  }
+
+  if (transcript !== '') {
+    lines.push(
+      '',
+      'CONVERSATION SO FAR',
+      'Earlier turns of this conversation, oldest first. The A: lines are your own',
+      'previous answers. Stay consistent with them, or say plainly that you are',
+      'changing your position and why.',
+      '',
+      transcript,
     );
   }
 

@@ -1147,6 +1147,30 @@ running `codex-mcp ask` is itself taken as consent — the human typed it — so
 there is no prompt. That is a deliberate weakening: anything able to invoke the
 CLI can reach your connectors without being asked.
 
+**It remembers, but only over MCP.** The server holds one running transcript
+for the life of a client session, so a follow-up question builds on the last
+answer:
+
+```text
+> My favourite colour is teal.        turn 1  "noted."
+> What is my favourite colour?        turn 2  "Teal"
+```
+
+`turn` in the response is how many exchanges it is carrying. Pass
+`reset: true` to start a new thread — worth doing when you change subject, since
+a stale transcript colours every later answer.
+
+The CLI does not remember, and cannot: `codex-mcp ask` exits when it prints, so
+there is no session for a transcript to belong to. That is the process model,
+not a flag.
+
+Remembering costs tokens, because the model is stateless and a remembered turn
+is a re-sent turn — there is no other mechanism. It is close to free in
+practice: Codex spends ~14,000 tokens of fixed overhead per call regardless,
+against roughly 40 per remembered turn. The 20-turn and 20,000-character caps
+are a rail against one pasted document riding along forever, not a cost
+control.
+
 Times out at 120s rather than the review path's 900s.
 
 ---

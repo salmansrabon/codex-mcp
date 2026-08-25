@@ -1,6 +1,6 @@
 import { constants } from 'node:fs';
 import { access, readFile, stat } from 'node:fs/promises';
-import { isAbsolute, resolve } from 'node:path';
+import { isAbsolute, relative, resolve } from 'node:path';
 
 export async function pathExists(target: string): Promise<boolean> {
   try {
@@ -57,10 +57,21 @@ export function resolveAgainst(base: string, candidate: string): string {
 }
 
 /** True when `child` is inside `parent` (or equal to it). */
+/**
+ * Whether `child` resolves to `parent` or somewhere underneath it.
+ *
+ * Built on `path.relative`, not string prefixing: a hardcoded `/` separator
+ * never matches a real nested path on Windows (paths resolve with `\`), and
+ * a plain `startsWith` would wrongly accept a sibling like `/project-other`
+ * for a parent `/project`. `relative` also gives the cross-drive case away for
+ * free -- on Windows, relative() between two drives returns the absolute
+ * target rather than a `..`-prefixed path, which is exactly what the
+ * `isAbsolute` check below catches.
+ */
 export function isInside(parent: string, child: string): boolean {
   const p = resolve(parent);
   const c = resolve(child);
   if (c === p) return true;
-  const sep = p.endsWith('/') ? '' : '/';
-  return c.startsWith(`${p}${sep}`);
+  const rel = relative(p, c);
+  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
 }

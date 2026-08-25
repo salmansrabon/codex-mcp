@@ -1,11 +1,21 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, parse } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { expandConfigValue, loadConfig, usableConnectors, userConfigDir } from '../../src/config/config.js';
 import { findForbiddenEnvKeys, parseDotEnv } from '../../src/config/env.js';
+
+/**
+ * The filesystem root of the platform under test: `/` on POSIX, `C:\` on
+ * Windows. A POSIX literal like `/home/someone` is NOT absolute on Windows --
+ * `path.resolve` anchors it to the current drive and yields `D:\home\someone`
+ * -- so fixtures are built from the real root and expectations with `join`,
+ * asserting the same structure on both platforms.
+ */
+const ROOT = parse(process.cwd()).root;
+const abs = (...segments: string[]): string => join(ROOT, ...segments);
 import { CodexMcpError } from '../../src/errors/codex-mcp-error.js';
 
 let dir: string;
@@ -201,8 +211,9 @@ describe('user-level configuration discovery', () => {
   });
 
   it('derives the user directory from HOME when XDG_CONFIG_HOME is unset', () => {
-    expect(userConfigDir({ HOME: '/home/someone' })).toBe('/home/someone/.config/codex-mcp');
-    expect(userConfigDir({ XDG_CONFIG_HOME: '/cfg' })).toBe('/cfg/codex-mcp');
+    const home = abs('home', 'someone');
+    expect(userConfigDir({ HOME: home })).toBe(join(home, '.config', 'codex-mcp'));
+    expect(userConfigDir({ XDG_CONFIG_HOME: abs('cfg') })).toBe(join(abs('cfg'), 'codex-mcp'));
     expect(userConfigDir({})).toBeUndefined();
   });
 
@@ -232,8 +243,11 @@ describe('portable configuration', () => {
   });
 
   it('expands a leading ~ to the home directory', () => {
-    expect(expandConfigValue('~/db-mcp/dist/index.js', { HOME: '/home/qa' })).toBe('/home/qa/db-mcp/dist/index.js');
-    expect(expandConfigValue('~', { HOME: '/home/qa' })).toBe('/home/qa');
+    const home = abs('home', 'qa');
+    expect(expandConfigValue('~/db-mcp/dist/index.js', { HOME: home })).toBe(
+      join(home, 'db-mcp', 'dist', 'index.js'),
+    );
+    expect(expandConfigValue('~', { HOME: home })).toBe(home);
     // Only a leading segment; a tilde mid-path is a real filename.
     expect(expandConfigValue('/opt/~backup/x', { HOME: '/home/qa' })).toBe('/opt/~backup/x');
   });

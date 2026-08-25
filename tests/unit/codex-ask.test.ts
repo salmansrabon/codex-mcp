@@ -4,6 +4,7 @@ import { CodexRunner } from '../../src/codex/codex-runner.js';
 import { loadConfig, type Config, type ConnectorConfig } from '../../src/config/config.js';
 import { CodexMcpError } from '../../src/errors/codex-mcp-error.js';
 import { AutoConsentGate, type ConsentGate } from '../../src/policy/consent.js';
+import { AskConversation } from '../../src/tools/ask-conversation.js';
 import { handleCodexAsk, type AskDeps } from '../../src/tools/codex-ask.js';
 import { Logger } from '../../src/util/logger.js';
 
@@ -41,8 +42,15 @@ function connector(overrides: Partial<ConnectorConfig> = {}): ConnectorConfig {
 }
 
 /** Capture the argv Codex would have been launched with, without launching it. */
-function harness(options: { connectors?: ConnectorConfig[]; consent?: ConsentGate; answer?: string } = {}) {
-  const calls: { args: readonly string[]; cwd: string }[] = [];
+function harness(
+  options: {
+    connectors?: ConnectorConfig[];
+    consent?: ConsentGate;
+    answer?: string;
+    conversation?: AskConversation;
+  } = {},
+) {
+  const calls: { args: readonly string[]; cwd: string; prompt: string }[] = [];
   const base = loadConfig({ cwd: process.cwd() });
   const config: Config = {
     ...base,
@@ -53,7 +61,7 @@ function harness(options: { connectors?: ConnectorConfig[]; consent?: ConsentGat
     config,
     logger,
     spawn: async (args, input) => {
-      calls.push({ args, cwd: input.cwd });
+      calls.push({ args, cwd: input.cwd, prompt: input.prompt });
       return {
         code: 0,
         signal: null,
@@ -75,6 +83,7 @@ function harness(options: { connectors?: ConnectorConfig[]; consent?: ConsentGat
     logger,
     auth: { requireAuthenticated: async () => ({ authenticated: true }) },
     consent: options.consent ?? new AutoConsentGate(false, 'No interactive client.'),
+    conversation: options.conversation ?? new AskConversation(),
   };
   return { deps, calls };
 }
@@ -201,5 +210,80 @@ describe('codex_ask', () => {
 
     await expect(handleCodexAsk(deps, { question: '   ' })).rejects.toThrow();
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe('codex_ask conversation memory', () => {
+  it('sends no transcript on the first question', async () => {
+    const { deps, calls } = harness();
+
+    await handleCodexAsk(deps, { question: 'First question?' });
+
+    expect(calls[0]!.prompt).not.toContain('CONVERSATION SO FAR');
+  });
+
+  it('carries the earlier exchange into the next question', async () => {
+    const conversation = new AskConversation();
+    const first = harness({ conversation, answer: 'Ghosts are unproven.' });
+    await handleCodexAsk(first.deps, { question: 'Does Ghost exist?' });
+
+    const second = harness({ conversation, answer: 'Still unproven.' });
+    await handleCodexAsk(second.deps, { question: 'Are you sure?' });
+
+    const prompt = second.calls[0]!.prompt;
+    expect(prompt).toContain('CONVERSATION SO FAR');
+    expect(prompt).toContain('Does Ghost exist?');
+    expect(prompt).toContain('Ghosts are unproven.');
+    expect(prompt).toContain('Are you sure?');
+  });
+
+  it('reports how many turns it is carrying', async () => {
+    const conversation = new AskConversation();
+    const first = harness({ conversation });
+    const one = await handleCodexAsk(first.deps, { question: 'One?' });
+
+    const second = harness({ conversation });
+    const two = await handleCodexAsk(second.deps, { question: 'Two?' });
+
+    expect(one.turn).toBe(1);
+    expect(two.turn).toBe(2);
+  });
+
+  it('forgets the conversation when reset is requested', async () => {
+    const conversation = new AskConversation();
+    const first = harness({ conversation });
+    await handleCodexAsk(first.deps, { question: 'Something forgettable?' });
+
+    const second = harness({ conversation });
+    await handleCodexAsk(second.deps, { question: 'Fresh start?', reset: true });
+
+    expect(second.calls[0]!.prompt).not.toContain('Something forgettable?');
+    expect(second.calls[0]!.prompt).not.toContain('CONVERSATION SO FAR');
+  });
+
+  it('records nothing when the question is rejected', async () => {
+    // A rejected call never reached the model, so it is not part of the
+    // conversation and must not pollute the next prompt.
+    const conversation = new AskConversation();
+    const { deps } = harness({ conversation });
+
+    await expect(handleCodexAsk(deps, { question: '  ' })).rejects.toThrow();
+
+    expect(conversation.turns).toBe(0);
+  });
+
+  it('keeps history out of what the answer can reach', async () => {
+    // Memory must widen context, never capability: the scratch root and the
+    // consent gate behave identically on turn two.
+    const conversation = new AskConversation();
+    const first = harness({ conversation });
+    await handleCodexAsk(first.deps, { question: 'Turn one?' });
+
+    const second = harness({ conversation, connectors: [connector()] });
+    await handleCodexAsk(second.deps, { question: 'Turn two?' });
+
+    const args = second.calls[0]!.args;
+    expect(args[args.indexOf('-C') + 1]).not.toBe(process.cwd());
+    expect(brokerArgs(args)).toEqual([]);
   });
 });

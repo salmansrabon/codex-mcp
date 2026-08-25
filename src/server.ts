@@ -7,6 +7,7 @@ import type { Config } from './config/config.js';
 import { CodexMcpError, toCodexMcpError } from './errors/codex-mcp-error.js';
 import { ElicitationConsentGate, type ConsentGate } from './policy/consent.js';
 import { ReviewOrchestrator } from './review/review-orchestrator.js';
+import { AskConversation } from './tools/ask-conversation.js';
 import {
   CODEX_ASK_DESCRIPTION,
   CODEX_ASK_INPUT_SCHEMA,
@@ -74,6 +75,12 @@ export class CodexMcpServer {
    * session rather than prompting again per surface.
    */
   private readonly consent: ConsentGate;
+  /**
+   * One conversation for the life of this server process, which is one MCP
+   * client session. That is what makes `codex_ask` remember here and not in
+   * the CLI, where each command is its own process.
+   */
+  private readonly conversation = new AskConversation();
 
   constructor(private readonly options: CodexMcpServerOptions) {
     this.authManager = new AuthManager({
@@ -170,6 +177,7 @@ export class CodexMcpServer {
             logger: this.options.logger,
             auth: this.authManager,
             consent: this.consent,
+            conversation: this.conversation,
           },
           args,
         );
